@@ -33,11 +33,14 @@ export interface ContainerConfig {
   env?: Record<string, string>;
 }
 
+export type Channel = 'whatsapp' | 'telegram';
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
   trigger: string;
   added_at: string;
+  channel: Channel;
   containerConfig?: ContainerConfig;
 }
 
@@ -52,6 +55,7 @@ export interface NewMessage {
   sender_name: string;
   content: string;
   timestamp: string;
+  channel: Channel;
 }
 
 export interface ScheduledTask {

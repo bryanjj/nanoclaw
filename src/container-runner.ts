@@ -17,6 +17,7 @@ import {
 } from './config.js';
 import { RegisteredGroup } from './types.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { dashboardEvents } from './dashboard-events.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -26,6 +27,7 @@ const logger = pino({
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const STREAM_PREFIX = '---NANOCLAW_STREAM---';
 
 function getHomeDir(): string {
   const home = process.env.HOME || os.homedir();
@@ -197,6 +199,15 @@ export async function runContainerAgent(
     isMain: input.isMain
   }, 'Spawning container agent');
 
+  // Emit container spawn event for dashboard
+  dashboardEvents.emitDashboard({
+    type: 'container_spawn',
+    timestamp: new Date().toISOString(),
+    groupFolder: group.folder,
+    chatJid: input.chatJid,
+    data: { prompt: input.prompt.slice(0, 100) }
+  });
+
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
@@ -230,7 +241,23 @@ export async function runContainerAgent(
       const chunk = data.toString();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
-        if (line) logger.debug({ container: group.folder }, line);
+        // Parse and emit stream events for dashboard
+        if (line.startsWith(STREAM_PREFIX)) {
+          try {
+            const streamEvent = JSON.parse(line.slice(STREAM_PREFIX.length));
+            dashboardEvents.emitDashboard({
+              type: 'agent_event',
+              timestamp: streamEvent.timestamp,
+              groupFolder: streamEvent.groupFolder,
+              chatJid: streamEvent.chatJid,
+              data: streamEvent.event
+            });
+          } catch {
+            // Ignore parse errors
+          }
+        } else if (line) {
+          logger.debug({ container: group.folder }, line);
+        }
       }
       if (stderrTruncated) return;
       const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
@@ -322,6 +349,15 @@ export async function runContainerAgent(
           logFile
         }, 'Container exited with error');
 
+        // Emit container complete event for dashboard (error case)
+        dashboardEvents.emitDashboard({
+          type: 'container_complete',
+          timestamp: new Date().toISOString(),
+          groupFolder: group.folder,
+          chatJid: input.chatJid,
+          data: { status: 'error', duration, code }
+        });
+
         resolve({
           status: 'error',
           result: null,
@@ -352,6 +388,15 @@ export async function runContainerAgent(
           status: output.status,
           hasResult: !!output.result
         }, 'Container completed');
+
+        // Emit container complete event for dashboard
+        dashboardEvents.emitDashboard({
+          type: 'container_complete',
+          timestamp: new Date().toISOString(),
+          groupFolder: group.folder,
+          chatJid: input.chatJid,
+          data: { status: output.status, duration }
+        });
 
         resolve(output);
       } catch (err) {

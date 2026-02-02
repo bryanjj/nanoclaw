@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { proto } from '@whiskeysockets/baileys';
-import { NewMessage, ScheduledTask, TaskRunLog } from './types.js';
+import { NewMessage, ScheduledTask, TaskRunLog, Channel } from './types.js';
 import { STORE_DIR } from './config.js';
 
 let db: Database.Database;
@@ -68,6 +68,16 @@ export function initDatabase(): void {
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`);
+  } catch { /* column already exists */ }
+
+  // Add channel column if it doesn't exist (migration for existing DBs)
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN channel TEXT DEFAULT 'whatsapp'`);
+  } catch { /* column already exists */ }
+
+  // Add channel column to chats if it doesn't exist
+  try {
+    db.exec(`ALTER TABLE chats ADD COLUMN channel TEXT DEFAULT 'whatsapp'`);
   } catch { /* column already exists */ }
 }
 
@@ -159,8 +169,25 @@ export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFrom
   const senderName = pushName || sender.split('@')[0];
   const msgId = msg.key.id || '';
 
-  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0);
+  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, 'whatsapp');
+}
+
+/**
+ * Store a generic message (for non-WhatsApp channels like Telegram).
+ */
+export function storeGenericMessage(
+  msgId: string,
+  chatJid: string,
+  sender: string,
+  senderName: string,
+  content: string,
+  timestamp: string,
+  isFromMe: boolean,
+  channel: Channel
+): void {
+  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, channel);
 }
 
 export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix: string): { messages: NewMessage[]; newTimestamp: string } {
@@ -169,7 +196,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
   const placeholders = jids.map(() => '?').join(',');
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(channel, 'whatsapp') as channel
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
@@ -188,7 +215,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
 export function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(channel, 'whatsapp') as channel
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
     ORDER BY timestamp

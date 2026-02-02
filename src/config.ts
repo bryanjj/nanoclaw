@@ -29,3 +29,7 @@ export const TRIGGER_PATTERN = new RegExp(`^@${escapeRegex(ASSISTANT_NAME)}\\b`,
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default
 export const TIMEZONE = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Dashboard configuration
+export const DASHBOARD_ENABLED = process.env.DASHBOARD_ENABLED !== 'false';
+export const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT || '3847', 10);

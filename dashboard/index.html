@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NanoClaw Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      margin-bottom: 20px;
+      padding-bottom: 15px;
+      border-bottom: 1px solid #21262d;
+    }
+    h1 { font-size: 20px; color: #58a6ff; font-weight: 600; }
+    .status {
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .status.connected { background: #238636; color: #fff; }
+    .status.disconnected { background: #da3633; color: #fff; }
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      height: calc(100vh - 100px);
+    }
+    @media (max-width: 900px) {
+      .container { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel h2 {
+      font-size: 12px;
+      color: #8b949e;
+      padding: 12px 15px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid #21262d;
+      background: #0d1117;
+    }
+    .events {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+    .event {
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      background: #0d1117;
+      border-radius: 4px;
+      font-size: 12px;
+      border-left: 3px solid #21262d;
+    }
+    .event.agent_event { border-left-color: #58a6ff; }
+    .event.container_spawn { border-left-color: #d29922; }
+    .event.container_complete { border-left-color: #238636; }
+    .event.message_received { border-left-color: #a371f7; }
+    .event.message_sent { border-left-color: #3fb950; }
+    .event-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .event-time { color: #484f58; font-size: 11px; }
+    .event-type {
+      font-weight: 600;
+      color: #58a6ff;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.3px;
+    }
+    .event-group {
+      color: #d29922;
+      font-size: 11px;
+      background: #d2992215;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+    .event-data {
+      color: #8b949e;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 80px;
+      overflow: hidden;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .event-data.tool { color: #79c0ff; }
+    .event-data.result { color: #7ee787; }
+    .event-data.error { color: #f85149; }
+    .clear-btn {
+      background: none;
+      border: 1px solid #21262d;
+      color: #8b949e;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      margin-left: auto;
+    }
+    .clear-btn:hover { border-color: #8b949e; color: #c9d1d9; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>NanoClaw</h1>
+    <div class="status disconnected" id="status">Disconnected</div>
+    <button class="clear-btn" onclick="clearEvents()">Clear</button>
+  </header>
+  <div class="container">
+    <div class="panel">
+      <h2>Agent Activity</h2>
+      <div class="events" id="agent-events"></div>
+    </div>
+    <div class="panel">
+      <h2>System Events</h2>
+      <div class="events" id="system-events"></div>
+    </div>
+  </div>
+  <script>
+    const agentPanel = document.getElementById('agent-events');
+    const systemPanel = document.getElementById('system-events');
+    const statusEl = document.getElementById('status');
+
+    function clearEvents() {
+      agentPanel.innerHTML = '';
+      systemPanel.innerHTML = '';
+    }
+
+    function connect() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${location.host}`);
+
+      ws.onopen = () => {
+        statusEl.textContent = 'Connected';
+        statusEl.className = 'status connected';
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = 'Reconnecting...';
+        statusEl.className = 'status disconnected';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'history') {
+            msg.events.forEach(ev => addEvent(ev, false));
+          } else if (msg.type === 'event') {
+            addEvent(msg.event, true);
+          }
+        } catch (err) {
+          console.error('Failed to parse message:', err);
+        }
+      };
+    }
+
+    function formatEventData(event) {
+      const data = event.data;
+      if (!data) return '';
+
+      // Agent events have nested structure
+      if (event.type === 'agent_event' && typeof data === 'object') {
+        const ev = data;
+        if (ev.type === 'user') {
+          return `User message`;
+        }
+        if (ev.type === 'assistant') {
+          if (ev.message?.content) {
+            const content = ev.message.content;
+            if (Array.isArray(content)) {
+              const parts = content.map(c => {
+                if (c.type === 'tool_use') {
+                  const input = c.input || {};
+                  // Show relevant input for common tools
+                  if (c.name === 'Bash' && input.command) {
+                    return `$ ${input.command.slice(0, 200)}`;
+                  }
+                  if (c.name === 'Read' && input.file_path) {
+                    return `Read: ${input.file_path}`;
+                  }
+                  if (c.name === 'Write' && input.file_path) {
+                    return `Write: ${input.file_path}`;
+                  }
+                  if (c.name === 'Edit' && input.file_path) {
+                    return `Edit: ${input.file_path}`;
+                  }
+                  if (c.name === 'Grep' && input.pattern) {
+                    return `Grep: ${input.pattern}`;
+                  }
+                  if (c.name === 'Glob' && input.pattern) {
+                    return `Glob: ${input.pattern}`;
+                  }
+                  if (c.name === 'WebFetch' && input.url) {
+                    return `Fetch: ${input.url.slice(0, 100)}`;
+                  }
+                  if (c.name === 'WebSearch' && input.query) {
+                    return `Search: ${input.query}`;
+                  }
+                  return `Tool: ${c.name}`;
+                }
+                if (c.type === 'text') return c.text?.slice(0, 100) || '';
+                return '';
+              }).filter(Boolean);
+              return parts.join('\n');
+            }
+          }
+          return 'Assistant response';
+        }
+        if (ev.type === 'tool_result') {
+          return `Tool result (${ev.tool_use_id?.slice(-8) || 'unknown'})`;
+        }
+        if (ev.type === 'system') {
+          return `System: ${ev.subtype || 'unknown'}`;
+        }
+        return JSON.stringify(ev).slice(0, 150);
+      }
+
+      // Other events
+      if (typeof data === 'object') {
+        const parts = [];
+        if (data.status) parts.push(`Status: ${data.status}`);
+        if (data.duration) parts.push(`Duration: ${data.duration}ms`);
+        if (data.sender) parts.push(`From: ${data.sender}`);
+        if (data.preview) parts.push(data.preview);
+        if (data.length) parts.push(`Length: ${data.length}`);
+        if (parts.length) return parts.join(' | ');
+        return JSON.stringify(data).slice(0, 150);
+      }
+
+      return String(data).slice(0, 150);
+    }
+
+    function getDataClass(event) {
+      if (event.type === 'agent_event' && event.data) {
+        if (event.data.type === 'tool_result') return 'result';
+        if (event.data.type === 'assistant') return 'tool';
+      }
+      return '';
+    }
+
+    function addEvent(event, prepend = true) {
+      const isAgent = event.type === 'agent_event';
+      const panel = isAgent ? agentPanel : systemPanel;
+
+      const el = document.createElement('div');
+      el.className = `event ${event.type}`;
+
+      const dataStr = formatEventData(event);
+      const dataClass = getDataClass(event);
+      const typeLabel = event.type.replace(/_/g, ' ');
+
+      el.innerHTML = `
+        <div class="event-header">
+          <span class="event-time">${new Date(event.timestamp).toLocaleTimeString()}</span>
+          <span class="event-type">${typeLabel}</span>
+          ${event.groupFolder ? `<span class="event-group">${event.groupFolder}</span>` : ''}
+        </div>
+        ${dataStr ? `<div class="event-data ${dataClass}">${escapeHtml(dataStr)}</div>` : ''}
+      `;
+
+      if (prepend) {
+        panel.insertBefore(el, panel.firstChild);
+      } else {
+        panel.appendChild(el);
+      }
+
+      // Limit displayed events
+      while (panel.children.length > 100) {
+        panel.removeChild(panel.lastChild);
+      }
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    connect();
+  </script>
+</body>
+</html>

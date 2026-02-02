@@ -47,6 +47,7 @@ async function readStdin(): Promise<string> {
 
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const STREAM_PREFIX = '---NANOCLAW_STREAM---';
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
@@ -256,6 +257,15 @@ async function main(): Promise<void> {
         }
       }
     })) {
+      // Stream event to stderr for real-time dashboard
+      console.error(`${STREAM_PREFIX}${JSON.stringify({
+        type: 'agent_event',
+        timestamp: new Date().toISOString(),
+        groupFolder: input.groupFolder,
+        chatJid: input.chatJid,
+        event: message
+      })}`);
+
       if (message.type === 'system' && message.subtype === 'init') {
         newSessionId = message.session_id;
         log(`Session initialized: ${newSessionId}`);

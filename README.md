@@ -6,6 +6,8 @@
   My personal Claude assistant that runs securely in containers. Lightweight and built to be understood and customized for your own needs.
 </p>
 
+> **This fork** uses Telegram as the default channel and adds a real-time dashboard to see what the agent is thinking. Forked from [gavrielc/nanoclaw](https://github.com/gavrielc/nanoclaw).
+
 ## Why I Built This
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But I can't sleep well running software I don't understand with access to my life. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
@@ -15,12 +17,14 @@ NanoClaw gives you the same core functionality in a codebase you can understand 
 ## Quick Start
 
 ```bash
-git clone https://github.com/gavrielc/nanoclaw.git
+git clone https://github.com/bryanjj/nanoclaw.git
 cd nanoclaw
 claude
 ```
 
 Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
+
+Once running, open **http://localhost:3847** to see the real-time dashboard.
 
 ## Philosophy
 
@@ -32,7 +36,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 **Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that this is safe.
 
-**AI-native.** No installation wizard; Claude Code guides setup. No monitoring dashboard; ask Claude what's happening. No debugging tools; describe the problem, Claude fixes it.
+**AI-native.** No installation wizard; Claude Code guides setup. Real-time dashboard shows agent thinking. No debugging tools; describe the problem, Claude fixes it.
 
 **Skills over features.** Contributors shouldn't add features (e.g. support for Telegram) to the codebase. Instead, they contribute [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
 
@@ -42,9 +46,10 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 ## What It Supports
 
-- **WhatsApp I/O** - Message Claude from your phone
+- **Telegram I/O** - Message Claude from your phone (WhatsApp also supported)
+- **Real-time dashboard** - See agent thoughts, tool calls, and activity at http://localhost:3847
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
-- **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
+- **Main channel** - Your private channel for admin control; every other group is completely isolated
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
 - **Web access** - Search and fetch content
 - **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
@@ -113,23 +118,28 @@ Skills we'd love to see:
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Telegram/WhatsApp --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+                                                          |
+                                                          v
+                                                    Dashboard (WebSocket)
 ```
 
 Single Node.js process. Agents execute in isolated Linux containers with mounted directories. IPC via filesystem. No daemons, no queues, no complexity.
 
 Key files:
-- `src/index.ts` - Main app: WhatsApp connection, routing, IPC
+- `src/index.ts` - Main app: messaging, routing, IPC
 - `src/container-runner.ts` - Spawns agent containers
+- `src/dashboard-server.ts` - Real-time WebSocket dashboard
 - `src/task-scheduler.ts` - Runs scheduled tasks
 - `src/db.ts` - SQLite operations
 - `groups/*/CLAUDE.md` - Per-group memory
+- `dashboard/index.html` - Dashboard UI
 
 ## FAQ
 
-**Why WhatsApp and not Telegram/Signal/etc?**
+**Why Telegram?**
 
-Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
+This fork defaults to Telegram because it's easier to set up (just a bot token, no QR code scanning). WhatsApp is also fully supported if you prefer it.
 
 **Why Apple Container instead of Docker?**
 
