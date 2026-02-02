@@ -9,6 +9,10 @@ store/
 data/
 logs/
 
+# Personal group data (memory, logs, conversations)
+groups/*/
+!groups/README.md
+
 # Secrets
 *.keys.json
 .env
