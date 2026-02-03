@@ -80,8 +80,8 @@ If unsure which mode to use, ask the user. Examples:
 - "Follow up on my request" → group (needs to know what was requested)
 - "Generate a daily report" → isolated (just needs instructions in prompt)
 
-SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
-• cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *" for daily at 9am LOCAL time)
+SCHEDULE VALUE FORMAT (all times are UTC):
+• cron: Standard cron expression in UTC (e.g., "*/5 * * * *" for every 5 minutes, "0 17 * * *" for daily at 9am PST/5pm UTC)
 • interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
 • once: UTC timestamp (e.g., "2026-02-01T23:30:00" or "2026-02-01T23:30:00Z"). Always interpreted as UTC.`,
         {

@@ -401,7 +401,7 @@ async function processTaskIpc(
         let nextRun: string | null = null;
         if (scheduleType === 'cron') {
           try {
-            const interval = CronExpressionParser.parse(data.schedule_value, { tz: TIMEZONE });
+            const interval = CronExpressionParser.parse(data.schedule_value, { tz: 'UTC' });
             nextRun = interval.next().toISOString();
           } catch {
             logger.warn({ scheduleValue: data.schedule_value }, 'Invalid cron expression');

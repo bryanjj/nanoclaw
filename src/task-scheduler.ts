@@ -96,7 +96,7 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
 
   let nextRun: string | null = null;
   if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, { tz: TIMEZONE });
+    const interval = CronExpressionParser.parse(task.schedule_value, { tz: 'UTC' });
     nextRun = interval.next().toISOString();
   } else if (task.schedule_type === 'interval') {
     const ms = parseInt(task.schedule_value, 10);
