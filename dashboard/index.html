@@ -78,8 +78,9 @@
       display: flex;
       align-items: center;
       gap: 10px;
-      margin-bottom: 6px;
+      cursor: pointer;
     }
+    .event-header:hover { opacity: 0.8; }
     .event-time { color: #484f58; font-size: 11px; }
     .event-type {
       font-weight: 600;
@@ -95,18 +96,39 @@
       padding: 2px 6px;
       border-radius: 3px;
     }
+    .event-toggle {
+      color: #484f58;
+      font-size: 10px;
+      margin-left: auto;
+    }
     .event-data {
       color: #8b949e;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 80px;
-      overflow: hidden;
       font-size: 11px;
       line-height: 1.5;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #21262d;
     }
-    .event-data.tool { color: #79c0ff; }
+    .event-data.collapsed {
+      max-height: 60px;
+      overflow: hidden;
+      position: relative;
+    }
+    .event-data.collapsed::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 30px;
+      background: linear-gradient(transparent, #0d1117);
+    }
+    .event-data.tool { color: #f0883e; }
     .event-data.result { color: #7ee787; }
     .event-data.error { color: #f85149; }
+    .event-data.user { color: #79c0ff; }
     .clear-btn {
       background: none;
       border: 1px solid #21262d;
@@ -187,7 +209,15 @@
       if (event.type === 'agent_event' && typeof data === 'object') {
         const ev = data;
         if (ev.type === 'user') {
-          return `User message`;
+          // Try different possible structures
+          const content = ev.message?.content || ev.content;
+          if (typeof content === 'string') return content;
+          if (Array.isArray(content)) {
+            const text = content.map(c => c.text || c.content || '').filter(Boolean).join('');
+            if (text) return text;
+          }
+          // Fallback: show raw JSON
+          return JSON.stringify(ev, null, 2);
         }
         if (ev.type === 'assistant') {
           if (ev.message?.content) {
@@ -196,9 +226,9 @@
               const parts = content.map(c => {
                 if (c.type === 'tool_use') {
                   const input = c.input || {};
-                  // Show relevant input for common tools
+                  // Show relevant input for common tools - no truncation
                   if (c.name === 'Bash' && input.command) {
-                    return `$ ${input.command.slice(0, 200)}`;
+                    return `$ ${input.command}`;
                   }
                   if (c.name === 'Read' && input.file_path) {
                     return `Read: ${input.file_path}`;
@@ -216,14 +246,21 @@
                     return `Glob: ${input.pattern}`;
                   }
                   if (c.name === 'WebFetch' && input.url) {
-                    return `Fetch: ${input.url.slice(0, 100)}`;
+                    return `Fetch: ${input.url}`;
                   }
                   if (c.name === 'WebSearch' && input.query) {
                     return `Search: ${input.query}`;
                   }
+                  // MCP tools - show the full tool name and input params - no truncation
+                  if (c.name.startsWith('mcp__')) {
+                    const params = Object.entries(input)
+                      .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+                      .join(', ');
+                    return `${c.name}(${params})`;
+                  }
                   return `Tool: ${c.name}`;
                 }
-                if (c.type === 'text') return c.text?.slice(0, 100) || '';
+                if (c.type === 'text') return c.text || '';
                 return '';
               }).filter(Boolean);
               return parts.join('\n');
@@ -237,10 +274,10 @@
         if (ev.type === 'system') {
           return `System: ${ev.subtype || 'unknown'}`;
         }
-        return JSON.stringify(ev).slice(0, 150);
+        return JSON.stringify(ev, null, 2);
       }
 
-      // Other events
+      // Other events - no truncation
       if (typeof data === 'object') {
         const parts = [];
         if (data.status) parts.push(`Status: ${data.status}`);
@@ -248,19 +285,30 @@
         if (data.sender) parts.push(`From: ${data.sender}`);
         if (data.preview) parts.push(data.preview);
         if (data.length) parts.push(`Length: ${data.length}`);
+        if (data.prompt) parts.push(`Prompt: ${data.prompt}`);
         if (parts.length) return parts.join(' | ');
-        return JSON.stringify(data).slice(0, 150);
+        return JSON.stringify(data, null, 2);
       }
 
-      return String(data).slice(0, 150);
+      return String(data);
     }
 
     function getDataClass(event) {
       if (event.type === 'agent_event' && event.data) {
         if (event.data.type === 'tool_result') return 'result';
         if (event.data.type === 'assistant') return 'tool';
+        if (event.data.type === 'user') return 'user';
       }
       return '';
+    }
+
+    function toggleCollapse(el) {
+      const dataEl = el.parentElement.querySelector('.event-data');
+      const toggleEl = el.querySelector('.event-toggle');
+      if (dataEl) {
+        dataEl.classList.toggle('collapsed');
+        toggleEl.textContent = dataEl.classList.contains('collapsed') ? '▶ expand' : '▼ collapse';
+      }
     }
 
     function addEvent(event, prepend = true) {
@@ -273,14 +321,16 @@
       const dataStr = formatEventData(event);
       const dataClass = getDataClass(event);
       const typeLabel = event.type.replace(/_/g, ' ');
+      const isLong = dataStr.length > 150 || dataStr.includes('\n');
 
       el.innerHTML = `
-        <div class="event-header">
+        <div class="event-header" onclick="toggleCollapse(this)">
           <span class="event-time">${new Date(event.timestamp).toLocaleTimeString()}</span>
           <span class="event-type">${typeLabel}</span>
           ${event.groupFolder ? `<span class="event-group">${event.groupFolder}</span>` : ''}
+          ${dataStr ? `<span class="event-toggle">${isLong ? '▶ expand' : ''}</span>` : ''}
         </div>
-        ${dataStr ? `<div class="event-data ${dataClass}">${escapeHtml(dataStr)}</div>` : ''}
+        ${dataStr ? `<div class="event-data ${dataClass}${isLong ? ' collapsed' : ''}">${escapeHtml(dataStr)}</div>` : ''}
       `;
 
       if (prepend) {

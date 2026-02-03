@@ -415,7 +415,12 @@ async function processTaskIpc(
           }
           nextRun = new Date(Date.now() + ms).toISOString();
         } else if (scheduleType === 'once') {
-          const scheduled = new Date(data.schedule_value);
+          // Always interpret as UTC - add Z if missing
+          let utcValue = data.schedule_value;
+          if (!utcValue.endsWith('Z') && !utcValue.includes('+') && !utcValue.includes('-', 10)) {
+            utcValue = utcValue + 'Z';
+          }
+          const scheduled = new Date(utcValue);
           if (isNaN(scheduled.getTime())) {
             logger.warn({ scheduleValue: data.schedule_value }, 'Invalid timestamp');
             break;
