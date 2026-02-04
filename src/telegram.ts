@@ -1,7 +1,11 @@
 import TelegramBot from 'node-telegram-bot-api';
 import pino from 'pino';
+import path from 'path';
 import { storeGenericMessage, storeChatMetadata } from './db.js';
 import { RegisteredGroup } from './types.js';
+import { GROUPS_DIR } from './config.js';
+import fs from 'fs';
+import https from 'https';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -90,9 +94,7 @@ export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | nul
 
   bot = new TelegramBot(token, { polling: true });
 
-  bot.on('message', (msg) => {
-    if (!msg.text) return;
-
+  bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const jid = telegramChatIdToJid(chatId);
     const timestamp = new Date(msg.date * 1000).toISOString();
@@ -106,6 +108,58 @@ export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | nul
     // Always store chat metadata for discovery
     storeChatMetadata(jid, timestamp, chatName);
 
+    // Handle different message types
+    let content = msg.text || '';
+    let hasMedia = false;
+
+    // Handle photos
+    if (msg.photo && msg.photo.length > 0) {
+      try {
+        // Get the highest resolution photo
+        const photo = msg.photo[msg.photo.length - 1];
+        const fileId = photo.file_id;
+
+        // Ensure images directory exists (use host path for main service)
+        const imagesDir = path.join(GROUPS_DIR, 'main', 'images');
+        try {
+          if (!fs.existsSync(imagesDir)) {
+            fs.mkdirSync(imagesDir, { recursive: true });
+          }
+        } catch (mkdirErr) {
+          logger.warn({ imagesDir, mkdirErr }, 'Could not create images directory, it may already exist');
+        }
+
+        // Get file info
+        const file = await bot!.getFile(fileId);
+
+        if (file.file_path) {
+          // Use simpler approach: get file link and download with fetch
+          const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+          const localPath = path.join(imagesDir, `${fileId}.jpg`);
+
+          const response = await fetch(fileUrl);
+          const buffer = await response.arrayBuffer();
+          fs.writeFileSync(localPath, Buffer.from(buffer));
+
+          // Path for containers to access the image
+          const containerPath = `/workspace/group/images/${fileId}.jpg`;
+          content = `[Image: ${containerPath}]${msg.caption ? '\n' + msg.caption : ''}`;
+          hasMedia = true;
+          logger.info({ chatId, hostPath: localPath, containerPath }, 'Photo downloaded');
+        } else {
+          content = `[Image - no file path]${msg.caption ? '\n' + msg.caption : ''}`;
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const errorStack = err instanceof Error ? err.stack : undefined;
+        logger.error({ chatId, err, errorMsg, errorStack }, 'Failed to download photo');
+        content = `[Image - download failed: ${errorMsg}]${msg.caption ? '\n' + msg.caption : ''}`;
+      }
+    }
+
+    // Skip if no content at all
+    if (!content) return;
+
     // Only store full message content for registered groups
     const registeredGroups = callbacks.getRegisteredGroups();
     if (registeredGroups[jid]) {
@@ -114,7 +168,7 @@ export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | nul
         jid,
         sender,
         senderName,
-        msg.text,
+        content,
         timestamp,
         isFromMe,
         'telegram'
@@ -125,7 +179,7 @@ export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | nul
         id: msg.message_id.toString(),
         sender,
         senderName,
-        content: msg.text,
+        content,
         timestamp
       });
     }

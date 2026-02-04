@@ -277,16 +277,8 @@
         return JSON.stringify(ev, null, 2);
       }
 
-      // Other events - no truncation
+      // Other events (system events) - show full JSON
       if (typeof data === 'object') {
-        const parts = [];
-        if (data.status) parts.push(`Status: ${data.status}`);
-        if (data.duration) parts.push(`Duration: ${data.duration}ms`);
-        if (data.sender) parts.push(`From: ${data.sender}`);
-        if (data.preview) parts.push(data.preview);
-        if (data.length) parts.push(`Length: ${data.length}`);
-        if (data.prompt) parts.push(`Prompt: ${data.prompt}`);
-        if (parts.length) return parts.join(' | ');
         return JSON.stringify(data, null, 2);
       }
 
