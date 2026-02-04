@@ -26,7 +26,7 @@ import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessa
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
-import { connectTelegram, sendTelegramMessage, setTelegramTyping, isTelegramConnected } from './telegram.js';
+import { connectTelegram, sendTelegramMessage, sendTelegramPhoto, setTelegramTyping, isTelegramConnected } from './telegram.js';
 import { startDashboardServer } from './dashboard-server.js';
 import { dashboardEvents } from './dashboard-events.js';
 
@@ -267,6 +267,36 @@ async function sendMessage(jid: string, text: string): Promise<void> {
   }
 }
 
+async function sendPhoto(jid: string, photoPath: string, caption?: string): Promise<void> {
+  logger.info({ jid, photoPath, caption }, 'sendPhoto called');
+
+  // Check if file exists
+  if (!fs.existsSync(photoPath)) {
+    logger.error({ jid, photoPath }, 'Photo file does not exist');
+    return;
+  }
+
+  logger.info({ jid, photoPath, fileSize: fs.statSync(photoPath).size }, 'Photo file exists');
+
+  // Emit message sent event for dashboard
+  dashboardEvents.emitDashboard({
+    type: 'message_sent',
+    timestamp: new Date().toISOString(),
+    chatJid: jid,
+    data: { photo: photoPath, caption }
+  });
+
+  // Route to appropriate channel
+  if (jid.endsWith('@telegram')) {
+    logger.info({ jid, photoPath }, 'Routing to Telegram');
+    await sendTelegramPhoto(jid, photoPath, caption);
+    logger.info({ jid, photoPath }, 'Telegram photo sent successfully');
+  } else {
+    // WhatsApp photo sending would go here
+    logger.warn({ jid }, 'Photo sending not implemented for WhatsApp yet');
+  }
+}
+
 function startIpcWatcher(): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
@@ -306,6 +336,17 @@ function startIpcWatcher(): void {
                   logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC message sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
+                }
+              } else if (data.type === 'photo' && data.chatJid && data.photoPath) {
+                logger.info({ data, sourceGroup }, 'Processing photo IPC message');
+                // Authorization: verify this group can send to this chatJid
+                const targetGroup = registeredGroups[data.chatJid];
+                if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+                  logger.info({ chatJid: data.chatJid, photoPath: data.photoPath, caption: data.caption }, 'Calling sendPhoto');
+                  await sendPhoto(data.chatJid, data.photoPath, data.caption);
+                  logger.info({ chatJid: data.chatJid, sourceGroup, photoPath: data.photoPath }, 'IPC photo sent');
+                } else {
+                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC photo attempt blocked');
                 }
               }
               fs.unlinkSync(filePath);

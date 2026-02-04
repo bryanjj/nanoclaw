@@ -66,6 +66,29 @@ export async function sendTelegramMessage(jid: string, text: string): Promise<vo
 }
 
 /**
+ * Send a photo to a Telegram chat.
+ */
+export async function sendTelegramPhoto(jid: string, photoPath: string, caption?: string): Promise<void> {
+  if (!bot) {
+    logger.error('Telegram bot not initialized');
+    return;
+  }
+
+  const chatId = jidToTelegramChatId(jid);
+  if (chatId === null) {
+    logger.error({ jid }, 'Invalid Telegram JID');
+    return;
+  }
+
+  try {
+    await bot.sendPhoto(chatId, photoPath, caption ? { caption } : undefined);
+    logger.info({ chatId, photoPath }, 'Telegram photo sent');
+  } catch (err) {
+    logger.error({ chatId, photoPath, err }, 'Failed to send Telegram photo');
+  }
+}
+
+/**
  * Set typing indicator for a Telegram chat.
  */
 export async function setTelegramTyping(jid: string, isTyping: boolean): Promise<void> {

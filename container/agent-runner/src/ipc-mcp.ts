@@ -67,6 +67,34 @@ export function createIpcMcp(ctx: IpcMcpContext) {
       ),
 
       tool(
+        'send_photo',
+        'Send a photo/image to the current chat. The photo must exist in the filesystem.',
+        {
+          photo_path: z.string().describe('Absolute path to the image file (e.g., /workspace/group/images/screenshot.png)'),
+          caption: z.string().optional().describe('Optional caption for the photo')
+        },
+        async (args: { photo_path: string; caption?: string }) => {
+          const data = {
+            type: 'photo',
+            chatJid,
+            photoPath: args.photo_path,
+            caption: args.caption,
+            groupFolder,
+            timestamp: new Date().toISOString()
+          };
+
+          const filename = writeIpcFile(MESSAGES_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: `Photo queued for delivery (${filename})`
+            }]
+          };
+        }
+      ),
+
+      tool(
         'schedule_task',
         `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 
