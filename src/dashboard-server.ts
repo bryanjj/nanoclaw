@@ -30,6 +30,20 @@ export function startDashboardServer(): void {
       }
       return;
     }
+
+    // Serve favicon
+    if (req.url === '/favicon.svg') {
+      const faviconPath = path.join(process.cwd(), 'dashboard', 'favicon.svg');
+      if (fs.existsSync(faviconPath)) {
+        res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+        res.end(fs.readFileSync(faviconPath));
+      } else {
+        res.writeHead(404);
+        res.end('Favicon not found');
+      }
+      return;
+    }
+
     res.writeHead(404);
     res.end('Not found');
   });

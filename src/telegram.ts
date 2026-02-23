@@ -105,6 +105,32 @@ export async function setTelegramTyping(jid: string, isTyping: boolean): Promise
 }
 
 /**
+ * React to a Telegram message with an emoji.
+ */
+export async function sendTelegramReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+  if (!bot) {
+    logger.error('Telegram bot not initialized');
+    return;
+  }
+
+  const chatId = jidToTelegramChatId(jid);
+  if (chatId === null) {
+    logger.error({ jid }, 'Invalid Telegram JID');
+    return;
+  }
+
+  try {
+    await bot.setMessageReaction(chatId, parseInt(messageId, 10), {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      reaction: [{ type: 'emoji', emoji: emoji as any }]
+    });
+    logger.info({ chatId, messageId, emoji }, 'Telegram reaction sent');
+  } catch (err) {
+    logger.error({ chatId, messageId, emoji, err }, 'Failed to send Telegram reaction');
+  }
+}
+
+/**
  * Initialize and connect the Telegram bot.
  */
 export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | null {
@@ -115,7 +141,13 @@ export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | nul
     return null;
   }
 
-  bot = new TelegramBot(token, { polling: true });
+  bot = new TelegramBot(token, {
+    polling: {
+      params: {
+        allowed_updates: ['message', 'message_reaction', 'message_reaction_count']
+      }
+    }
+  });
 
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
@@ -206,6 +238,52 @@ export function connectTelegram(callbacks: TelegramCallbacks): TelegramBot | nul
         timestamp
       });
     }
+  });
+
+  // Handle emoji reactions from users
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  bot.on('message_reaction', async (reaction: any) => {
+    const chatId = reaction.chat?.id;
+    const jid = chatId ? telegramChatIdToJid(chatId) : null;
+    if (!jid) return;
+
+    const registeredGroups = callbacks.getRegisteredGroups();
+    if (!registeredGroups[jid]) return;
+
+    const timestamp = new Date(reaction.date * 1000).toISOString();
+    const sender = reaction.user?.id?.toString() || reaction.actor_chat?.id?.toString() || '';
+    const senderName = reaction.user?.first_name || reaction.user?.username || sender;
+    const messageId = reaction.message_id;
+
+    // Format new reactions as content (ignore removed reactions)
+    const newReactions: string[] = (reaction.new_reaction || [])
+      .map((r: { type: string; emoji?: string }) => r.type === 'emoji' ? r.emoji : null)
+      .filter(Boolean);
+
+    if (newReactions.length === 0) return; // Only old reactions removed, nothing to do
+
+    const content = `[Reaction: ${newReactions.join(' ')} on message ${messageId}]`;
+
+    storeGenericMessage(
+      `reaction-${messageId}-${sender}-${Date.now()}`,
+      jid,
+      sender,
+      senderName,
+      content,
+      timestamp,
+      false,
+      'telegram'
+    );
+
+    logger.info({ chatId, messageId, reactions: newReactions, sender }, 'Telegram reaction received');
+
+    callbacks.onMessage(jid, {
+      id: `reaction-${messageId}-${sender}`,
+      sender,
+      senderName,
+      content,
+      timestamp
+    });
   });
 
   bot.on('polling_error', (error) => {

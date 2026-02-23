@@ -17,6 +17,7 @@ export interface IpcMcpContext {
   chatJid: string;
   groupFolder: string;
   isMain: boolean;
+  messagesSent?: { value: number };  // Mutable counter for tracking sent messages
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -34,7 +35,7 @@ function writeIpcFile(dir: string, data: object): string {
 }
 
 export function createIpcMcp(ctx: IpcMcpContext) {
-  const { chatJid, groupFolder, isMain } = ctx;
+  const { chatJid, groupFolder, isMain, messagesSent } = ctx;
 
   return createSdkMcpServer({
     name: 'nanoclaw',
@@ -56,6 +57,11 @@ export function createIpcMcp(ctx: IpcMcpContext) {
           };
 
           const filename = writeIpcFile(MESSAGES_DIR, data);
+
+          // Track that a message was sent
+          if (messagesSent) {
+            messagesSent.value++;
+          }
 
           return {
             content: [{
@@ -85,10 +91,43 @@ export function createIpcMcp(ctx: IpcMcpContext) {
 
           const filename = writeIpcFile(MESSAGES_DIR, data);
 
+          // Track that a message was sent (photos count as messages)
+          if (messagesSent) {
+            messagesSent.value++;
+          }
+
           return {
             content: [{
               type: 'text',
               text: `Photo queued for delivery (${filename})`
+            }]
+          };
+        }
+      ),
+
+      tool(
+        'send_reaction',
+        'React to a Telegram message with an emoji. Use this to acknowledge messages without sending a full reply (e.g., 👍 to confirm you saw something, ❤️ to show appreciation).',
+        {
+          message_id: z.string().describe('The message ID to react to (visible in the message metadata)'),
+          emoji: z.string().describe('The emoji to react with (e.g., "👍", "❤️", "🔥", "👀", "✅")')
+        },
+        async (args: { message_id: string; emoji: string }) => {
+          const data = {
+            type: 'reaction',
+            chatJid,
+            messageId: args.message_id,
+            emoji: args.emoji,
+            groupFolder,
+            timestamp: new Date().toISOString()
+          };
+
+          const filename = writeIpcFile(MESSAGES_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: `Reaction queued (${filename})`
             }]
           };
         }
