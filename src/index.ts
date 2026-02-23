@@ -26,7 +26,8 @@ import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessa
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
-import { connectTelegram, sendTelegramMessage, sendTelegramPhoto, setTelegramTyping, isTelegramConnected } from './telegram.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
+import { connectTelegram, sendTelegramMessage, sendTelegramPhoto, sendTelegramReaction, setTelegramTyping, isTelegramConnected } from './telegram.js';
 import { startDashboardServer } from './dashboard-server.js';
 import { dashboardEvents } from './dashboard-events.js';
 
@@ -80,6 +81,14 @@ function saveState(): void {
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
+  let groupDir: string;
+  try {
+    groupDir = resolveGroupFolderPath(group.folder);
+  } catch (err) {
+    logger.warn({ jid, folder: group.folder, err }, 'Rejecting group registration with invalid folder');
+    return;
+  }
+
   // Ensure channel is set (default to whatsapp for backward compatibility)
   if (!group.channel) {
     group.channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
@@ -88,7 +97,6 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
 
   // Create group folder
-  const groupDir = path.join(DATA_DIR, '..', 'groups', group.folder);
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
   logger.info({ jid, name: group.name, folder: group.folder, channel: group.channel }, 'Group registered');
@@ -190,16 +198,22 @@ async function processMessage(msg: NewMessage): Promise<void> {
   });
 
   await setTyping(msg.chat_jid, true);
-  const response = await runAgent(group, prompt, msg.chat_jid);
+  const { response, messagesSent } = await runAgent(group, prompt, msg.chat_jid);
   await setTyping(msg.chat_jid, false);
 
-  if (response) {
+  // Only send response if:
+  // 1. There is a response
+  // 2. No IPC messages were sent (to avoid duplicate messages)
+  if (response && !messagesSent) {
     lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
     await sendMessage(msg.chat_jid, response);
+  } else if (messagesSent) {
+    // Messages were sent via IPC, update timestamp but don't auto-reply
+    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
   }
 }
 
-async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<string | null> {
+async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<{ response: string | null; messagesSent: number }> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
@@ -235,13 +249,13 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
 
     if (output.status === 'error') {
       logger.error({ group: group.name, error: output.error }, 'Container agent error');
-      return null;
+      return { response: null, messagesSent: output.messagesSent || 0 };
     }
 
-    return output.result;
+    return { response: output.result, messagesSent: output.messagesSent || 0 };
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return null;
+    return { response: null, messagesSent: 0 };
   }
 }
 
@@ -347,6 +361,19 @@ function startIpcWatcher(): void {
                   logger.info({ chatJid: data.chatJid, sourceGroup, photoPath: data.photoPath }, 'IPC photo sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC photo attempt blocked');
+                }
+              } else if (data.type === 'reaction' && data.chatJid && data.messageId && data.emoji) {
+                // Authorization: verify this group can send to this chatJid
+                const targetGroup = registeredGroups[data.chatJid];
+                if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+                  if (data.chatJid.endsWith('@telegram')) {
+                    await sendTelegramReaction(data.chatJid, data.messageId, data.emoji);
+                    logger.info({ chatJid: data.chatJid, messageId: data.messageId, emoji: data.emoji, sourceGroup }, 'IPC reaction sent');
+                  } else {
+                    logger.warn({ chatJid: data.chatJid }, 'Reactions only supported on Telegram');
+                  }
+                } else {
+                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC reaction attempt blocked');
                 }
               }
               fs.unlinkSync(filePath);
@@ -546,6 +573,10 @@ async function processTaskIpc(
         break;
       }
       if (data.jid && data.name && data.folder && data.trigger) {
+        if (!isValidGroupFolder(data.folder)) {
+          logger.warn({ sourceGroup, folder: data.folder }, 'Invalid register_group request - unsafe folder name');
+          break;
+        }
         const channel: Channel = data.jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
         registerGroup(data.jid, {
           name: data.name,
@@ -641,6 +672,14 @@ async function connectWhatsApp(): Promise<boolean> {
 
         // Only store full message content for registered groups
         if (registeredGroups[chatJid]) {
+          // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
+          const content =
+            msg.message?.conversation ||
+            msg.message?.extendedTextMessage?.text ||
+            msg.message?.imageMessage?.caption ||
+            msg.message?.videoMessage?.caption ||
+            '';
+          if (!content) continue;
           storeMessage(msg, chatJid, msg.key.fromMe || false, msg.pushName || undefined);
         }
       }
@@ -755,7 +794,10 @@ async function main(): Promise<void> {
     getSessions: () => sessions
   });
   startIpcWatcher();
-  startMessageLoop();
+  startMessageLoop().catch((err) => {
+    logger.fatal({ err }, 'Message loop crashed unexpectedly');
+    process.exit(1);
+  });
 }
 
 main().catch(err => {

@@ -1,11 +1,11 @@
 import fs from 'fs';
-import path from 'path';
 import pino from 'pino';
 import { CronExpressionParser } from 'cron-parser';
 import { getDueTasks, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks } from './db.js';
 import { ScheduledTask, RegisteredGroup } from './types.js';
-import { GROUPS_DIR, SCHEDULER_POLL_INTERVAL, DATA_DIR, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
+import { SCHEDULER_POLL_INTERVAL, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
+import { resolveGroupFolderPath } from './group-folder.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -20,7 +20,22 @@ export interface SchedulerDependencies {
 
 async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
   const startTime = Date.now();
-  const groupDir = path.join(GROUPS_DIR, task.group_folder);
+  let groupDir: string;
+  try {
+    groupDir = resolveGroupFolderPath(task.group_folder);
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.error({ taskId: task.id, groupFolder: task.group_folder, error }, 'Task has invalid group folder');
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: 'error',
+      result: null,
+      error
+    });
+    return;
+  }
   fs.mkdirSync(groupDir, { recursive: true });
 
   logger.info({ taskId: task.id, group: task.group_folder }, 'Running scheduled task');

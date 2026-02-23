@@ -17,6 +17,7 @@ import {
 } from './config.js';
 import { RegisteredGroup } from './types.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { dashboardEvents } from './dashboard-events.js';
 
 const logger = pino({
@@ -44,6 +45,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  secrets?: Record<string, string>;
 }
 
 export interface ContainerOutput {
@@ -51,6 +53,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  messagesSent?: number;
 }
 
 interface VolumeMount {
@@ -63,25 +66,30 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
   const mounts: VolumeMount[] = [];
   const homeDir = getHomeDir();
   const projectRoot = process.cwd();
+  const groupDir = resolveGroupFolderPath(group.folder);
 
   if (isMain) {
-    // Main gets the entire project root mounted
+    // Main gets the project root read-only. Writable paths the agent needs
+    // (group folder, IPC, .claude/) are mounted separately below.
+    // Read-only prevents the agent from modifying host application code
+    // (src/, dist/, package.json, etc.) which would bypass the sandbox
+    // entirely on next restart.
     mounts.push({
       hostPath: projectRoot,
       containerPath: '/workspace/project',
-      readonly: false
+      readonly: true
     });
 
     // Main also gets its group folder as the working directory
     mounts.push({
-      hostPath: path.join(GROUPS_DIR, group.folder),
+      hostPath: groupDir,
       containerPath: '/workspace/group',
       readonly: false
     });
   } else {
     // Other groups only get their own folder
     mounts.push({
-      hostPath: path.join(GROUPS_DIR, group.folder),
+      hostPath: groupDir,
       containerPath: '/workspace/group',
       readonly: false
     });
@@ -110,7 +118,7 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);
+  const groupIpcDir = resolveGroupIpcPath(group.folder);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   mounts.push({
@@ -118,32 +126,6 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
     containerPath: '/workspace/ipc',
     readonly: false
   });
-
-  // Environment file directory (workaround for Apple Container -i env var bug)
-  // Only expose specific auth variables needed by Claude Code, not the entire .env
-  const envDir = path.join(DATA_DIR, 'env');
-  fs.mkdirSync(envDir, { recursive: true });
-  const envFile = path.join(projectRoot, '.env');
-  if (fs.existsSync(envFile)) {
-    const envContent = fs.readFileSync(envFile, 'utf-8');
-    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
-    const filteredLines = envContent
-      .split('\n')
-      .filter(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) return false;
-        return allowedVars.some(v => trimmed.startsWith(`${v}=`));
-      });
-
-    if (filteredLines.length > 0) {
-      fs.writeFileSync(path.join(envDir, 'env'), filteredLines.join('\n') + '\n');
-      mounts.push({
-        hostPath: envDir,
-        containerPath: '/workspace/env-dir',
-        readonly: true
-      });
-    }
-  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -175,13 +157,45 @@ function buildContainerArgs(mounts: VolumeMount[]): string[] {
   return args;
 }
 
+/**
+ * Read allowed secrets from .env for passing to the container via stdin.
+ * Secrets are never written to disk or mounted as files.
+ */
+function readSecrets(): Record<string, string> {
+  const envFile = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envFile)) return {};
+
+  const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+  const secrets: Record<string, string> = {};
+  const content = fs.readFileSync(envFile, 'utf-8');
+
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    if (!allowedVars.includes(key)) continue;
+    let value = trimmed.slice(eqIdx + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (value) secrets[key] = value;
+  }
+
+  return secrets;
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
-  const groupDir = path.join(GROUPS_DIR, group.folder);
+  const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
@@ -208,7 +222,7 @@ export async function runContainerAgent(
     data: { prompt: input.prompt.slice(0, 100) }
   });
 
-  const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
+  const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
@@ -221,8 +235,12 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
+    // Pass secrets via stdin (never written to disk or mounted as files)
+    input.secrets = readSecrets();
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
+    // Remove secrets from input so they don't appear in logs
+    delete input.secrets;
 
     container.stdout.on('data', (data) => {
       if (stdoutTruncated) return;
@@ -440,7 +458,7 @@ export function writeTasksSnapshot(
   }>
 ): void {
   // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Main sees all tasks, others only see their own
@@ -470,7 +488,7 @@ export function writeGroupsSnapshot(
   groups: AvailableGroup[],
   registeredJids: Set<string>
 ): void {
-  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Main sees all groups; others see nothing (they can't activate groups)
