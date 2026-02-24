@@ -16,6 +16,7 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  updateSession: (groupFolder: string, sessionId: string) => void;
 }
 
 async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
@@ -85,6 +86,10 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       isMain,
       isScheduledTask: true
     });
+
+    if (output.newSessionId) {
+      deps.updateSession(task.group_folder, output.newSessionId);
+    }
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';

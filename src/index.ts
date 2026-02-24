@@ -786,7 +786,11 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     sendMessage,
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions
+    getSessions: () => sessions,
+    updateSession: (groupFolder, sessionId) => {
+      sessions[groupFolder] = sessionId;
+      saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+    }
   });
   startIpcWatcher();
   startMessageLoop().catch((err) => {
