@@ -27,6 +27,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
+import { GroupQueue } from './group-queue.js';
 import { connectTelegram, sendTelegramMessage, sendTelegramPhoto, sendTelegramReaction, setTelegramTyping, isTelegramConnected } from './telegram.js';
 import { startDashboardServer } from './dashboard-server.js';
 import { dashboardEvents } from './dashboard-events.js';
@@ -43,6 +44,7 @@ let lastTimestamp = '';
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+const groupQueue = new GroupQueue();
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
   // Route to appropriate channel
@@ -695,16 +697,22 @@ async function startMessageLoop(): Promise<void> {
 
       if (messages.length > 0) logger.info({ count: messages.length }, 'New messages');
       for (const msg of messages) {
-        try {
-          await processMessage(msg);
-          // Only advance timestamp after successful processing for at-least-once delivery
-          lastTimestamp = msg.timestamp;
-          saveState();
-        } catch (err) {
-          logger.error({ err, msg: msg.id }, 'Error processing message, will retry');
-          // Stop processing this batch - failed message will be retried next loop
-          break;
+        const group = registeredGroups[msg.chat_jid];
+        if (group) {
+          // Enqueue per group — serializes container runs for the same group
+          // while allowing different groups to process in parallel.
+          // Don't await — advance the polling cursor immediately.
+          groupQueue.enqueue(group.folder, async () => {
+            try {
+              await processMessage(msg);
+            } catch (err) {
+              logger.error({ err, msg: msg.id }, 'Error processing message');
+            }
+          });
         }
+        // Advance polling cursor so we don't re-discover this message
+        lastTimestamp = msg.timestamp;
+        saveState();
       }
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
@@ -790,7 +798,8 @@ async function main(): Promise<void> {
     updateSession: (groupFolder, sessionId) => {
       sessions[groupFolder] = sessionId;
       saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
-    }
+    },
+    queue: groupQueue
   });
   startIpcWatcher();
   startMessageLoop().catch((err) => {

@@ -6,6 +6,7 @@ import { ScheduledTask, RegisteredGroup } from './types.js';
 import { SCHEDULER_POLL_INTERVAL, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { GroupQueue } from './group-queue.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -17,6 +18,7 @@ export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   updateSession: (groupFolder: string, sessionId: string) => void;
+  queue: GroupQueue;
 }
 
 async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
@@ -145,7 +147,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        await runTask(currentTask, deps);
+        // Enqueue per group — serializes with message processing
+        deps.queue.enqueue(currentTask.group_folder, () => runTask(currentTask, deps));
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
