@@ -31,7 +31,12 @@ export function startDashboardServer(): void {
       return;
     }
 
-    // Serve favicon
+    // Serve favicon (handle both .svg and .ico requests)
+    if (req.url === '/favicon.ico') {
+      res.writeHead(302, { 'Location': '/favicon.svg' });
+      res.end();
+      return;
+    }
     if (req.url === '/favicon.svg') {
       const faviconPath = path.join(process.cwd(), 'dashboard', 'favicon.svg');
       if (fs.existsSync(faviconPath)) {

@@ -201,14 +201,9 @@ async function processMessage(msg: NewMessage): Promise<void> {
   const { response, messagesSent } = await runAgent(group, prompt, msg.chat_jid);
   await setTyping(msg.chat_jid, false);
 
-  // Only send response if:
-  // 1. There is a response
-  // 2. No IPC messages were sent (to avoid duplicate messages)
-  if (response && !messagesSent) {
-    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
-    await sendMessage(msg.chat_jid, response);
-  } else if (messagesSent) {
-    // Messages were sent via IPC, update timestamp but don't auto-reply
+  // Update timestamp if the agent did anything (sent messages or produced a result)
+  // Never forward the agent's result text — agents must use send_message explicitly
+  if (response || messagesSent) {
     lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
   }
 }
