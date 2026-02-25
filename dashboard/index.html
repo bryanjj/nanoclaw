@@ -262,7 +262,9 @@
                   return `Tool: ${c.name}`;
                 }
                 if (c.type === 'text') return c.text || '';
-                return '';
+                if (c.type === 'thinking') return '(thinking...)';
+                if (c.type === 'server_tool_use') return `Server tool: ${c.name || 'unknown'}`;
+                return typeof c === 'object' ? JSON.stringify(c) : String(c);
               }).filter(Boolean);
               return parts.join('\n');
             }
@@ -275,7 +277,12 @@
         if (ev.type === 'system') {
           return `System: ${ev.subtype || 'unknown'}`;
         }
-        return JSON.stringify(ev, null, 2);
+        if (ev.type === 'result') {
+          const text = typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result);
+          return `Result: ${text}`;
+        }
+        // Catch-all for unknown event types
+        try { return JSON.stringify(ev, null, 2); } catch { return String(ev); }
       }
 
       // Other events (system events) - show full JSON
