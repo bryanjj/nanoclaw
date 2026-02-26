@@ -79,6 +79,84 @@ export function initDatabase(): void {
   try {
     db.exec(`ALTER TABLE chats ADD COLUMN channel TEXT DEFAULT 'whatsapp'`);
   } catch { /* column already exists */ }
+
+  // FTS5 on messages for full-text search
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+        USING fts5(content, content='messages', content_rowid='rowid');
+
+      CREATE TRIGGER IF NOT EXISTS messages_ai
+        AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS messages_ad
+        AFTER DELETE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS messages_au
+        AFTER UPDATE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+          INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+    `);
+  } catch { /* FTS table already exists */ }
+
+  // Thought history tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS thought_sessions (
+      id                    TEXT PRIMARY KEY,
+      chat_jid              TEXT,
+      group_folder          TEXT,
+      trigger_type          TEXT,
+      trigger_msg_id        TEXT,
+      task_id               TEXT,
+      trigger_preview       TEXT,
+      started_at            TEXT NOT NULL,
+      duration_ms           INTEGER,
+      block_count           INTEGER DEFAULT 0,
+      total_thinking_tokens INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS thought_blocks (
+      id              TEXT PRIMARY KEY,
+      session_id      TEXT NOT NULL REFERENCES thought_sessions(id),
+      block_index     INTEGER NOT NULL,
+      timestamp       TEXT NOT NULL,
+      thinking        TEXT NOT NULL,
+      thinking_tokens INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_thought_blocks_session ON thought_blocks(session_id, block_index);
+    CREATE INDEX IF NOT EXISTS idx_thought_sessions_started ON thought_sessions(started_at);
+    CREATE INDEX IF NOT EXISTS idx_thought_sessions_chat ON thought_sessions(chat_jid, started_at);
+    CREATE INDEX IF NOT EXISTS idx_thought_sessions_trigger_msg ON thought_sessions(trigger_msg_id);
+  `);
+
+  // FTS5 virtual table for full-text search over thinking content
+  // Wrapped in try/catch since CREATE VIRTUAL TABLE IF NOT EXISTS can still fail on some SQLite versions
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS thought_blocks_fts
+        USING fts5(thinking, content='thought_blocks', content_rowid='rowid');
+
+      CREATE TRIGGER IF NOT EXISTS thought_blocks_ai
+        AFTER INSERT ON thought_blocks BEGIN
+          INSERT INTO thought_blocks_fts(rowid, thinking) VALUES (new.rowid, new.thinking);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS thought_blocks_ad
+        AFTER DELETE ON thought_blocks BEGIN
+          INSERT INTO thought_blocks_fts(thought_blocks_fts, rowid, thinking) VALUES ('delete', old.rowid, old.thinking);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS thought_blocks_au
+        AFTER UPDATE ON thought_blocks BEGIN
+          INSERT INTO thought_blocks_fts(thought_blocks_fts, rowid, thinking) VALUES ('delete', old.rowid, old.thinking);
+          INSERT INTO thought_blocks_fts(rowid, thinking) VALUES (new.rowid, new.thinking);
+        END;
+    `);
+  } catch { /* FTS table already exists */ }
 }
 
 /**
@@ -316,4 +394,62 @@ export function getTaskRunLogs(taskId: string, limit = 10): TaskRunLog[] {
     ORDER BY run_at DESC
     LIMIT ?
   `).all(taskId, limit) as TaskRunLog[];
+}
+
+// --- Thought history ---
+
+export interface ThoughtSessionInput {
+  id: string;
+  chatJid: string;
+  groupFolder: string;
+  triggerType: string;
+  triggerMsgId?: string;
+  taskId?: string;
+  triggerPreview: string;
+  startedAt: string;
+}
+
+export function createThoughtSession(session: ThoughtSessionInput): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO thought_sessions
+      (id, chat_jid, group_folder, trigger_type, trigger_msg_id, task_id, trigger_preview, started_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    session.id,
+    session.chatJid,
+    session.groupFolder,
+    session.triggerType,
+    session.triggerMsgId ?? null,
+    session.taskId ?? null,
+    session.triggerPreview.slice(0, 200),
+    session.startedAt
+  );
+}
+
+export function insertThoughtBlock(block: {
+  id: string;
+  sessionId: string;
+  blockIndex: number;
+  timestamp: string;
+  thinking: string;
+  thinkingTokens?: number;
+}): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO thought_blocks
+      (id, session_id, block_index, timestamp, thinking, thinking_tokens)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(block.id, block.sessionId, block.blockIndex, block.timestamp, block.thinking, block.thinkingTokens ?? null);
+}
+
+export function finalizeThoughtSession(id: string, durationMs: number, blockCount: number, totalTokens: number | null): void {
+  db.prepare(`
+    UPDATE thought_sessions
+    SET duration_ms = ?, block_count = ?, total_thinking_tokens = ?
+    WHERE id = ?
+  `).run(durationMs, blockCount, totalTokens, id);
+}
+
+export function deleteThoughtSession(id: string): void {
+  db.prepare('DELETE FROM thought_blocks WHERE session_id = ?').run(id);
+  db.prepare('DELETE FROM thought_sessions WHERE id = ?').run(id);
 }

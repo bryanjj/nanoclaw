@@ -200,7 +200,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
   });
 
   await setTyping(msg.chat_jid, true);
-  const { response, messagesSent } = await runAgent(group, prompt, msg.chat_jid);
+  const { response, messagesSent } = await runAgent(group, prompt, msg.chat_jid, msg.id);
   await setTyping(msg.chat_jid, false);
 
   // Update timestamp if the agent did anything (sent messages or produced a result)
@@ -210,7 +210,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
   }
 }
 
-async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<{ response: string | null; messagesSent: number }> {
+async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string, triggerMsgId?: string): Promise<{ response: string | null; messagesSent: number }> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
@@ -236,7 +236,9 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
       sessionId,
       groupFolder: group.folder,
       chatJid,
-      isMain
+      isMain,
+      triggerType: 'user_message',
+      triggerMsgId
     });
 
     if (output.newSessionId) {

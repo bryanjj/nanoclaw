@@ -19,6 +19,7 @@ import { RegisteredGroup } from './types.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { dashboardEvents } from './dashboard-events.js';
+import { createThoughtSession, insertThoughtBlock, finalizeThoughtSession, deleteThoughtSession } from './db.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -46,6 +47,9 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   secrets?: Record<string, string>;
+  triggerType?: 'user_message' | 'scheduled_task' | 'reaction';
+  triggerMsgId?: string;
+  taskId?: string;
 }
 
 export interface ContainerOutput {
@@ -225,6 +229,21 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  // Thought history tracking
+  const thoughtSessionId = `${group.folder}-${Date.now()}`;
+  let thoughtBlockCount = 0;
+  let thoughtTotalTokens = 0;
+  createThoughtSession({
+    id: thoughtSessionId,
+    chatJid: input.chatJid,
+    groupFolder: group.folder,
+    triggerType: input.triggerType || 'user_message',
+    triggerMsgId: input.triggerMsgId,
+    taskId: input.taskId,
+    triggerPreview: input.prompt,
+    startedAt: new Date().toISOString()
+  });
+
   return new Promise((resolve) => {
     const container = spawn('container', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe']
@@ -270,6 +289,25 @@ export async function runContainerAgent(
               chatJid: streamEvent.chatJid,
               data: streamEvent.event
             });
+
+            // Capture thinking blocks for thought history
+            const ev = streamEvent.event;
+            if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
+              for (const block of ev.message.content) {
+                if (block.type === 'thinking' && typeof block.thinking === 'string') {
+                  insertThoughtBlock({
+                    id: `${thoughtSessionId}-${thoughtBlockCount}`,
+                    sessionId: thoughtSessionId,
+                    blockIndex: thoughtBlockCount,
+                    timestamp: streamEvent.timestamp,
+                    thinking: block.thinking,
+                    thinkingTokens: block.thinking_tokens
+                  });
+                  thoughtBlockCount++;
+                  if (block.thinking_tokens) thoughtTotalTokens += block.thinking_tokens;
+                }
+              }
+            }
           } catch {
             // Ignore parse errors
           }
@@ -301,6 +339,13 @@ export async function runContainerAgent(
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+
+      // Finalize thought history
+      if (thoughtBlockCount > 0) {
+        finalizeThoughtSession(thoughtSessionId, duration, thoughtBlockCount, thoughtTotalTokens || null);
+      } else {
+        deleteThoughtSession(thoughtSessionId);
+      }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logsDir, `container-${timestamp}.log`);

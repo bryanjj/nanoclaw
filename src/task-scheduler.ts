@@ -99,7 +99,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       groupFolder: task.group_folder,
       chatJid: task.chat_jid,
       isMain,
-      isScheduledTask: true
+      isScheduledTask: true,
+      triggerType: 'scheduled_task',
+      taskId: task.id
     });
 
     if (output.newSessionId) {
