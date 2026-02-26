@@ -284,6 +284,14 @@ export function getDueTasks(): ScheduledTask[] {
   `).all(now) as ScheduledTask[];
 }
 
+export function claimTask(id: string, nextRun: string | null): void {
+  db.prepare(`
+    UPDATE scheduled_tasks
+    SET next_run = ?, last_run = ?
+    WHERE id = ?
+  `).run(nextRun, new Date().toISOString(), id);
+}
+
 export function updateTaskAfterRun(id: string, nextRun: string | null, lastResult: string): void {
   const now = new Date().toISOString();
   db.prepare(`

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import pino from 'pino';
 import { CronExpressionParser } from 'cron-parser';
-import { getDueTasks, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks } from './db.js';
+import { getDueTasks, claimTask, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks } from './db.js';
 import { ScheduledTask, RegisteredGroup } from './types.js';
 import { SCHEDULER_POLL_INTERVAL, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
@@ -72,6 +72,19 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     next_run: t.next_run
   })));
 
+  // Pre-claim: advance next_run before execution so the scheduler
+  // won't pick this task up again while it's running
+  let nextRun: string | null = null;
+  if (task.schedule_type === 'cron') {
+    const interval = CronExpressionParser.parse(task.schedule_value, { tz: 'UTC' });
+    nextRun = interval.next().toISOString();
+  } else if (task.schedule_type === 'interval') {
+    const ms = parseInt(task.schedule_value, 10);
+    nextRun = new Date(Date.now() + ms).toISOString();
+  }
+  // 'once' tasks: nextRun stays null, so they won't be picked up again
+  claimTask(task.id, nextRun);
+
   let result: string | null = null;
   let error: string | null = null;
 
@@ -115,16 +128,6 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     result,
     error
   });
-
-  let nextRun: string | null = null;
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, { tz: 'UTC' });
-    nextRun = interval.next().toISOString();
-  } else if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    nextRun = new Date(Date.now() + ms).toISOString();
-  }
-  // 'once' tasks have no next run
 
   const resultSummary = error ? `Error: ${error}` : (result ? result.slice(0, 200) : 'Completed');
   updateTaskAfterRun(task.id, nextRun, resultSummary);
