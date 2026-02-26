@@ -22,7 +22,8 @@ import {
   DASHBOARD_ENABLED
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage, Channel } from './types.js';
-import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, getTaskById, updateChatName, getAllChats, getLastGroupSync, setLastGroupSync } from './db.js';
+import crypto from 'crypto';
+import { initDatabase, storeMessage, storeGenericMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, getTaskById, updateChatName, getAllChats, getLastGroupSync, setLastGroupSync } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -278,6 +279,10 @@ async function sendMessage(jid: string, text: string): Promise<void> {
       logger.error({ jid, err }, 'Failed to send message');
     }
   }
+
+  // Store outgoing message in history
+  const channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
+  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', text, new Date().toISOString(), true, channel as 'telegram' | 'whatsapp');
 }
 
 async function sendPhoto(jid: string, photoPath: string, caption?: string): Promise<void> {
@@ -308,6 +313,11 @@ async function sendPhoto(jid: string, photoPath: string, caption?: string): Prom
     // WhatsApp photo sending would go here
     logger.warn({ jid }, 'Photo sending not implemented for WhatsApp yet');
   }
+
+  // Store outgoing photo in history
+  const channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
+  const content = caption ? `[photo] ${caption}` : '[photo]';
+  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', content, new Date().toISOString(), true, channel as 'telegram' | 'whatsapp');
 }
 
 function startIpcWatcher(): void {
