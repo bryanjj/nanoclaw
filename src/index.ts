@@ -23,7 +23,8 @@ import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGr
 import { loadJson, saveJson } from './utils.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { GroupQueue } from './group-queue.js';
-import { connectTelegram, sendTelegramMessage, sendTelegramPhoto, sendTelegramReaction, setTelegramTyping, isTelegramConnected } from './telegram.js';
+import './channels/index.js';
+import { ChannelInstance, getRegisteredChannelNames, getChannelFactory } from './channels/registry.js';
 import { startDashboardServer } from './dashboard-server.js';
 import { dashboardEvents } from './dashboard-events.js';
 
@@ -37,9 +38,14 @@ let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 const groupQueue = new GroupQueue();
+const channels: ChannelInstance[] = [];
+
+function findChannel(jid: string): ChannelInstance | undefined {
+  return channels.find(c => c.ownsJid(jid));
+}
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
-  await setTelegramTyping(jid, isTyping);
+  await findChannel(jid)?.setTyping?.(jid, isTyping);
 }
 
 function loadState(): void {
@@ -75,7 +81,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   }
 
   if (!group.channel) {
-    group.channel = 'telegram';
+    group.channel = findChannel(jid)?.name || 'telegram';
   }
   registeredGroups[jid] = group;
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
@@ -95,7 +101,7 @@ function getAvailableGroups(): AvailableGroup[] {
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter(c => c.jid !== '__group_sync__' && c.jid.endsWith('@telegram'))
+    .filter(c => c.jid !== '__group_sync__' && channels.some(ch => ch.ownsJid(c.jid)))
     .map(c => ({
       jid: c.jid,
       name: c.name,
@@ -210,10 +216,15 @@ async function sendMessage(jid: string, text: string): Promise<void> {
     data: { length: text.length }
   });
 
-  await sendTelegramMessage(jid, text);
+  const channel = findChannel(jid);
+  if (channel) {
+    await channel.sendMessage(jid, text);
+  } else {
+    logger.warn({ jid }, 'No channel found for JID');
+  }
 
   // Store outgoing message in history
-  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', text, new Date().toISOString(), true, 'telegram');
+  storeGenericMessage(crypto.randomUUID(), jid, ASSISTANT_NAME, ASSISTANT_NAME, text, new Date().toISOString(), true, channel?.name || 'unknown');
 }
 
 async function sendPhoto(jid: string, photoPath: string, caption?: string): Promise<void> {
@@ -235,13 +246,17 @@ async function sendPhoto(jid: string, photoPath: string, caption?: string): Prom
     data: { photo: photoPath, caption }
   });
 
-  logger.info({ jid, photoPath }, 'Routing to Telegram');
-  await sendTelegramPhoto(jid, photoPath, caption);
-  logger.info({ jid, photoPath }, 'Telegram photo sent successfully');
+  const channel = findChannel(jid);
+  if (channel) {
+    await channel.sendPhoto(jid, photoPath, caption);
+    logger.info({ jid, photoPath, channel: channel.name }, 'Photo sent');
+  } else {
+    logger.warn({ jid, photoPath }, 'No channel found for JID');
+  }
 
   // Store outgoing photo in history
   const content = caption ? `[photo] ${caption}` : '[photo]';
-  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', content, new Date().toISOString(), true, 'telegram');
+  storeGenericMessage(crypto.randomUUID(), jid, ASSISTANT_NAME, ASSISTANT_NAME, content, new Date().toISOString(), true, channel?.name || 'unknown');
 }
 
 function startIpcWatcher(): void {
@@ -299,7 +314,7 @@ function startIpcWatcher(): void {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-                  await sendTelegramReaction(data.chatJid, data.messageId, data.emoji);
+                  await findChannel(data.chatJid)?.sendReaction?.(data.chatJid, data.messageId, data.emoji);
                   logger.info({ chatJid: data.chatJid, messageId: data.messageId, emoji: data.emoji, sourceGroup }, 'IPC reaction sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC reaction attempt blocked');
@@ -501,7 +516,7 @@ async function processTaskIpc(
           logger.warn({ sourceGroup, folder: data.folder }, 'Invalid register_group request - unsafe folder name');
           break;
         }
-        const channel = 'telegram';
+        const channel = findChannel(data.jid)?.name || 'telegram';
         registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
@@ -521,7 +536,8 @@ async function processTaskIpc(
 }
 
 async function startMessageLoop(): Promise<void> {
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME}, channel: Telegram)`);
+  const channelNames = channels.map(c => c.name).join(', ') || 'none';
+  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME}, channels: ${channelNames})`);
 
   while (true) {
     try {
@@ -578,17 +594,23 @@ function ensureContainerSystemRunning(): void {
   }
 }
 
-function initTelegram(): void {
-  connectTelegram({
-    onMessage: (chatId, message) => {
-      // The message is already stored in the database by the Telegram module
-      logger.debug({ chatId, messageId: message.id }, 'Telegram message received');
+function initChannels(): void {
+  const callbacks = {
+    onMessage: (chatJid: string, message: { id: string; sender: string; senderName: string; content: string; timestamp: string }) => {
+      logger.debug({ chatJid, messageId: message.id }, 'Channel message received');
     },
     getRegisteredGroups: () => registeredGroups
-  });
+  };
 
-  if (isTelegramConnected()) {
-    logger.info('Telegram channel enabled');
+  for (const name of getRegisteredChannelNames()) {
+    const factory = getChannelFactory(name)!;
+    const channel = factory(callbacks);
+    if (channel) {
+      channels.push(channel);
+      logger.info({ channel: name }, 'Channel enabled');
+    } else {
+      logger.warn({ channel: name }, 'Channel installed but credentials missing — skipping');
+    }
   }
 }
 
@@ -598,14 +620,14 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
-  initTelegram();
+  initChannels();
 
-  if (!isTelegramConnected()) {
-    logger.error('Telegram not configured. Set TELEGRAM_BOT_TOKEN in .env');
+  if (channels.length === 0) {
+    logger.error('No channels configured. Set TELEGRAM_BOT_TOKEN in .env (or configure another channel)');
     console.error('\n╔════════════════════════════════════════════════════════════════╗');
-    console.error('║  FATAL: Telegram not configured                                ║');
+    console.error('║  FATAL: No channels configured                                 ║');
     console.error('║                                                                ║');
-    console.error('║  Set TELEGRAM_BOT_TOKEN in .env                                ║');
+    console.error('║  Set TELEGRAM_BOT_TOKEN in .env or configure another channel   ║');
     console.error('╚════════════════════════════════════════════════════════════════╝\n');
     process.exit(1);
   }

@@ -33,7 +33,7 @@ export interface ContainerConfig {
   env?: Record<string, string>;
 }
 
-export type Channel = 'telegram';
+export type Channel = string;
 
 export interface RegisteredGroup {
   name: string;
