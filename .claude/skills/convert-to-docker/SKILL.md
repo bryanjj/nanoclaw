@@ -321,7 +321,7 @@ Expected: Both operations succeed.
 
 ```bash
 npm run dev
-# Send @AssistantName hello via WhatsApp
+# Send @AssistantName hello via Telegram
 # Verify response received
 ```
 

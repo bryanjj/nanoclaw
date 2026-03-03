@@ -1,8 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
-import { proto } from '@whiskeysockets/baileys';
-import { NewMessage, ScheduledTask, TaskRunLog, Channel } from './types.js';
+import { Channel, NewMessage, ScheduledTask, TaskRunLog } from './types.js';
 import { STORE_DIR } from './config.js';
 
 let db: Database.Database;
@@ -72,12 +71,12 @@ export function initDatabase(): void {
 
   // Add channel column if it doesn't exist (migration for existing DBs)
   try {
-    db.exec(`ALTER TABLE messages ADD COLUMN channel TEXT DEFAULT 'whatsapp'`);
+    db.exec(`ALTER TABLE messages ADD COLUMN channel TEXT DEFAULT 'telegram'`);
   } catch { /* column already exists */ }
 
   // Add channel column to chats if it doesn't exist
   try {
-    db.exec(`ALTER TABLE chats ADD COLUMN channel TEXT DEFAULT 'whatsapp'`);
+    db.exec(`ALTER TABLE chats ADD COLUMN channel TEXT DEFAULT 'telegram'`);
   } catch { /* column already exists */ }
 
   // FTS5 on messages for full-text search
@@ -182,18 +181,6 @@ export function storeChatMetadata(chatJid: string, timestamp: string, name?: str
   }
 }
 
-/**
- * Update chat name without changing timestamp for existing chats.
- * New chats get the current time as their initial timestamp.
- * Used during group metadata sync.
- */
-export function updateChatName(chatJid: string, name: string): void {
-  db.prepare(`
-    INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
-    ON CONFLICT(jid) DO UPDATE SET name = excluded.name
-  `).run(chatJid, name, new Date().toISOString());
-}
-
 export interface ChatInfo {
   jid: string;
   name: string;
@@ -212,47 +199,7 @@ export function getAllChats(): ChatInfo[] {
 }
 
 /**
- * Get timestamp of last group metadata sync.
- */
-export function getLastGroupSync(): string | null {
-  // Store sync time in a special chat entry
-  const row = db.prepare(`SELECT last_message_time FROM chats WHERE jid = '__group_sync__'`).get() as { last_message_time: string } | undefined;
-  return row?.last_message_time || null;
-}
-
-/**
- * Record that group metadata was synced.
- */
-export function setLastGroupSync(): void {
-  const now = new Date().toISOString();
-  db.prepare(`INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES ('__group_sync__', '__group_sync__', ?)`).run(now);
-}
-
-/**
  * Store a message with full content.
- * Only call this for registered groups where message history is needed.
- */
-export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFromMe: boolean, pushName?: string): void {
-  if (!msg.key) return;
-
-  const content =
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption ||
-    '';
-
-  const timestamp = new Date(Number(msg.messageTimestamp) * 1000).toISOString();
-  const sender = msg.key.participant || msg.key.remoteJid || '';
-  const senderName = pushName || sender.split('@')[0];
-  const msgId = msg.key.id || '';
-
-  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, 'whatsapp');
-}
-
-/**
- * Store a generic message (for non-WhatsApp channels like Telegram).
  */
 export function storeGenericMessage(
   msgId: string,
@@ -274,7 +221,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
   const placeholders = jids.map(() => '?').join(',');
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(channel, 'whatsapp') as channel
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(channel, 'telegram') as channel
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
@@ -293,7 +240,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
 export function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(channel, 'whatsapp') as channel
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, COALESCE(channel, 'telegram') as channel
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
     ORDER BY timestamp

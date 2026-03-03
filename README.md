@@ -46,7 +46,7 @@ Once running, open **http://localhost:3847** to see the real-time dashboard.
 
 ## What It Supports
 
-- **Telegram I/O** - Message Claude from your phone (WhatsApp also supported)
+- **Telegram I/O** - Message Claude from your phone
 - **Real-time dashboard** - See agent thoughts, tool calls, and activity at http://localhost:3847
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
 - **Main channel** - Your private channel for admin control; every other group is completely isolated
@@ -89,16 +89,15 @@ The codebase is small enough that Claude can safely modify it.
 
 **Don't add features. Add skills.**
 
-If you want to add Telegram support, don't create a PR that adds Telegram alongside WhatsApp. Instead, contribute a skill file (`.claude/skills/add-telegram/SKILL.md`) that teaches Claude Code how to transform a NanoClaw installation to use Telegram.
+If you want to add Slack support, don't create a PR that adds Slack alongside Telegram. Instead, contribute a skill file (`.claude/skills/add-slack/SKILL.md`) that teaches Claude Code how to transform a NanoClaw installation to use Slack.
 
-Users then run `/add-telegram` on their fork and get clean code that does exactly what they need, not a bloated system trying to support every use case.
+Users then run `/add-slack` on their fork and get clean code that does exactly what they need, not a bloated system trying to support every use case.
 
 ### RFS (Request for Skills)
 
 Skills we'd love to see:
 
 **Communication Channels**
-- `/add-telegram` - Add Telegram as channel. Should give the user option to replace WhatsApp or add as additional channel. Also should be possible to add it as a control channel (where it can trigger actions) or just a channel that can be used in actions triggered elsewhere
 - `/add-slack` - Add Slack
 - `/add-discord` - Add Discord
 
@@ -118,7 +117,7 @@ Skills we'd love to see:
 ## Architecture
 
 ```
-Telegram/WhatsApp --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Telegram --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
                                                           |
                                                           v
                                                     Dashboard (WebSocket)
@@ -139,7 +138,7 @@ Key files:
 
 **Why Telegram?**
 
-This fork defaults to Telegram because it's easier to set up (just a bot token, no QR code scanning). WhatsApp is also fully supported if you prefer it.
+Telegram is easy to set up — just create a bot with BotFather and you get a token. No QR code scanning, no phone number linking.
 
 **Why Apple Container instead of Docker?**
 

@@ -1,10 +1,4 @@
 import 'dotenv/config';
-import makeWASocket, {
-  useMultiFileAuthState,
-  DisconnectReason,
-  makeCacheableSignalKeyStore,
-  WASocket
-} from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { exec, execSync } from 'child_process';
 import fs from 'fs';
@@ -21,9 +15,9 @@ import {
   TIMEZONE,
   DASHBOARD_ENABLED
 } from './config.js';
-import { RegisteredGroup, Session, NewMessage, Channel } from './types.js';
+import { RegisteredGroup, Session, NewMessage } from './types.js';
 import crypto from 'crypto';
-import { initDatabase, storeMessage, storeGenericMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, getTaskById, updateChatName, getAllChats, getLastGroupSync, setLastGroupSync } from './db.js';
+import { initDatabase, storeGenericMessage, getNewMessages, getMessagesSince, getAllTasks, getTaskById, getAllChats } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -33,14 +27,11 @@ import { connectTelegram, sendTelegramMessage, sendTelegramPhoto, sendTelegramRe
 import { startDashboardServer } from './dashboard-server.js';
 import { dashboardEvents } from './dashboard-events.js';
 
-const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
   transport: { target: 'pino-pretty', options: { colorize: true } }
 });
 
-let sock: WASocket;
 let lastTimestamp = '';
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
@@ -48,16 +39,7 @@ let lastAgentTimestamp: Record<string, string> = {};
 const groupQueue = new GroupQueue();
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
-  // Route to appropriate channel
-  if (jid.endsWith('@telegram')) {
-    await setTelegramTyping(jid, isTyping);
-  } else {
-    try {
-      await sock.sendPresenceUpdate(isTyping ? 'composing' : 'paused', jid);
-    } catch (err) {
-      logger.debug({ jid, err }, 'Failed to update typing status');
-    }
-  }
+  await setTelegramTyping(jid, isTyping);
 }
 
 function loadState(): void {
@@ -68,10 +50,10 @@ function loadState(): void {
   sessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
   registeredGroups = loadJson(path.join(DATA_DIR, 'registered_groups.json'), {});
 
-  // Ensure all groups have a channel (migration for existing configs)
-  for (const [jid, group] of Object.entries(registeredGroups)) {
+  // Ensure all groups have a channel set
+  for (const [, group] of Object.entries(registeredGroups)) {
     if (!group.channel) {
-      group.channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
+      group.channel = 'telegram';
     }
   }
 
@@ -92,9 +74,8 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     return;
   }
 
-  // Ensure channel is set (default to whatsapp for backward compatibility)
   if (!group.channel) {
-    group.channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
+    group.channel = 'telegram';
   }
   registeredGroups[jid] = group;
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
@@ -106,54 +87,15 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 }
 
 /**
- * Sync group metadata from WhatsApp.
- * Fetches all participating groups and stores their names in the database.
- * Called on startup, daily, and on-demand via IPC.
- */
-async function syncGroupMetadata(force = false): Promise<void> {
-  // Check if we need to sync (skip if synced recently, unless forced)
-  if (!force) {
-    const lastSync = getLastGroupSync();
-    if (lastSync) {
-      const lastSyncTime = new Date(lastSync).getTime();
-      const now = Date.now();
-      if (now - lastSyncTime < GROUP_SYNC_INTERVAL_MS) {
-        logger.debug({ lastSync }, 'Skipping group sync - synced recently');
-        return;
-      }
-    }
-  }
-
-  try {
-    logger.info('Syncing group metadata from WhatsApp...');
-    const groups = await sock.groupFetchAllParticipating();
-
-    let count = 0;
-    for (const [jid, metadata] of Object.entries(groups)) {
-      if (metadata.subject) {
-        updateChatName(jid, metadata.subject);
-        count++;
-      }
-    }
-
-    setLastGroupSync();
-    logger.info({ count }, 'Group metadata synced');
-  } catch (err) {
-    logger.error({ err }, 'Failed to sync group metadata');
-  }
-}
-
-/**
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
- * Includes both WhatsApp groups (@g.us) and Telegram chats (@telegram).
  */
 function getAvailableGroups(): AvailableGroup[] {
   const chats = getAllChats();
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter(c => c.jid !== '__group_sync__' && (c.jid.endsWith('@g.us') || c.jid.endsWith('@telegram')))
+    .filter(c => c.jid !== '__group_sync__' && c.jid.endsWith('@telegram'))
     .map(c => ({
       jid: c.jid,
       name: c.name,
@@ -268,21 +210,10 @@ async function sendMessage(jid: string, text: string): Promise<void> {
     data: { length: text.length }
   });
 
-  // Route to appropriate channel
-  if (jid.endsWith('@telegram')) {
-    await sendTelegramMessage(jid, text);
-  } else {
-    try {
-      await sock.sendMessage(jid, { text });
-      logger.info({ jid, length: text.length }, 'Message sent');
-    } catch (err) {
-      logger.error({ jid, err }, 'Failed to send message');
-    }
-  }
+  await sendTelegramMessage(jid, text);
 
   // Store outgoing message in history
-  const channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
-  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', text, new Date().toISOString(), true, channel as 'telegram' | 'whatsapp');
+  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', text, new Date().toISOString(), true, 'telegram');
 }
 
 async function sendPhoto(jid: string, photoPath: string, caption?: string): Promise<void> {
@@ -304,20 +235,13 @@ async function sendPhoto(jid: string, photoPath: string, caption?: string): Prom
     data: { photo: photoPath, caption }
   });
 
-  // Route to appropriate channel
-  if (jid.endsWith('@telegram')) {
-    logger.info({ jid, photoPath }, 'Routing to Telegram');
-    await sendTelegramPhoto(jid, photoPath, caption);
-    logger.info({ jid, photoPath }, 'Telegram photo sent successfully');
-  } else {
-    // WhatsApp photo sending would go here
-    logger.warn({ jid }, 'Photo sending not implemented for WhatsApp yet');
-  }
+  logger.info({ jid, photoPath }, 'Routing to Telegram');
+  await sendTelegramPhoto(jid, photoPath, caption);
+  logger.info({ jid, photoPath }, 'Telegram photo sent successfully');
 
   // Store outgoing photo in history
-  const channel = jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
   const content = caption ? `[photo] ${caption}` : '[photo]';
-  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', content, new Date().toISOString(), true, channel as 'telegram' | 'whatsapp');
+  storeGenericMessage(crypto.randomUUID(), jid, 'tom', 'tom', content, new Date().toISOString(), true, 'telegram');
 }
 
 function startIpcWatcher(): void {
@@ -375,12 +299,8 @@ function startIpcWatcher(): void {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-                  if (data.chatJid.endsWith('@telegram')) {
-                    await sendTelegramReaction(data.chatJid, data.messageId, data.emoji);
-                    logger.info({ chatJid: data.chatJid, messageId: data.messageId, emoji: data.emoji, sourceGroup }, 'IPC reaction sent');
-                  } else {
-                    logger.warn({ chatJid: data.chatJid }, 'Reactions only supported on Telegram');
-                  }
+                  await sendTelegramReaction(data.chatJid, data.messageId, data.emoji);
+                  logger.info({ chatJid: data.chatJid, messageId: data.messageId, emoji: data.emoji, sourceGroup }, 'IPC reaction sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC reaction attempt blocked');
                 }
@@ -560,11 +480,8 @@ async function processTaskIpc(
       break;
 
     case 'refresh_groups':
-      // Only main group can request a refresh
       if (isMain) {
-        logger.info({ sourceGroup }, 'Group metadata refresh requested via IPC');
-        await syncGroupMetadata(true);
-        // Write updated snapshot immediately
+        logger.info({ sourceGroup }, 'Group list refresh requested via IPC');
         const availableGroups = getAvailableGroups();
         const { writeGroupsSnapshot: writeGroups } = await import('./container-runner.js');
         writeGroups(sourceGroup, true, availableGroups, new Set(Object.keys(registeredGroups)));
@@ -584,7 +501,7 @@ async function processTaskIpc(
           logger.warn({ sourceGroup, folder: data.folder }, 'Invalid register_group request - unsafe folder name');
           break;
         }
-        const channel: Channel = data.jid.endsWith('@telegram') ? 'telegram' : 'whatsapp';
+        const channel = 'telegram';
         registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
@@ -603,102 +520,8 @@ async function processTaskIpc(
   }
 }
 
-let whatsappEnabled = false;
-
-async function connectWhatsApp(): Promise<boolean> {
-  const authDir = path.join(STORE_DIR, 'auth');
-
-  // Check if WhatsApp auth exists
-  if (!fs.existsSync(path.join(authDir, 'creds.json'))) {
-    logger.info('No WhatsApp authentication found, WhatsApp channel disabled');
-    return false;
-  }
-
-  fs.mkdirSync(authDir, { recursive: true });
-
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
-
-  sock = makeWASocket({
-    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-    printQRInTerminal: false,
-    logger,
-    browser: ['NanoClaw', 'Chrome', '1.0.0']
-  });
-
-  return new Promise((resolve) => {
-    sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        const msg = 'WhatsApp authentication required. Run /setup in Claude Code.';
-        logger.warn(msg);
-        exec(`osascript -e 'display notification "${msg}" with title "NanoClaw" sound name "Basso"'`);
-        // Don't exit, just disable WhatsApp
-        whatsappEnabled = false;
-        resolve(false);
-        return;
-      }
-
-      if (connection === 'close') {
-        const reason = (lastDisconnect?.error as any)?.output?.statusCode;
-        const shouldReconnect = reason !== DisconnectReason.loggedOut;
-        logger.info({ reason, shouldReconnect }, 'WhatsApp connection closed');
-
-        if (shouldReconnect) {
-          logger.info('Reconnecting to WhatsApp...');
-          connectWhatsApp();
-        } else {
-          logger.info('WhatsApp logged out. Run /setup to re-authenticate.');
-          whatsappEnabled = false;
-        }
-      } else if (connection === 'open') {
-        logger.info('Connected to WhatsApp');
-        whatsappEnabled = true;
-        // Sync group metadata on startup (respects 24h cache)
-        syncGroupMetadata().catch(err => logger.error({ err }, 'Initial group sync failed'));
-        // Set up daily sync timer
-        setInterval(() => {
-          syncGroupMetadata().catch(err => logger.error({ err }, 'Periodic group sync failed'));
-        }, GROUP_SYNC_INTERVAL_MS);
-        resolve(true);
-      }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('messages.upsert', ({ messages }) => {
-      for (const msg of messages) {
-        if (!msg.message) continue;
-        const chatJid = msg.key.remoteJid;
-        if (!chatJid || chatJid === 'status@broadcast') continue;
-
-        const timestamp = new Date(Number(msg.messageTimestamp) * 1000).toISOString();
-
-        // Always store chat metadata for group discovery
-        storeChatMetadata(chatJid, timestamp);
-
-        // Only store full message content for registered groups
-        if (registeredGroups[chatJid]) {
-          // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
-          const content =
-            msg.message?.conversation ||
-            msg.message?.extendedTextMessage?.text ||
-            msg.message?.imageMessage?.caption ||
-            msg.message?.videoMessage?.caption ||
-            '';
-          if (!content) continue;
-          storeMessage(msg, chatJid, msg.key.fromMe || false, msg.pushName || undefined);
-        }
-      }
-    });
-  });
-}
-
 async function startMessageLoop(): Promise<void> {
-  const channels: string[] = [];
-  if (whatsappEnabled) channels.push('WhatsApp');
-  if (isTelegramConnected()) channels.push('Telegram');
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME}, channels: ${channels.join(', ')})`);
+  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME}, channel: Telegram)`);
 
   while (true) {
     try {
@@ -758,7 +581,6 @@ function ensureContainerSystemRunning(): void {
 function initTelegram(): void {
   connectTelegram({
     onMessage: (chatId, message) => {
-      // Telegram messages are processed through the same loop as WhatsApp
       // The message is already stored in the database by the Telegram module
       logger.debug({ chatId, messageId: message.id }, 'Telegram message received');
     },
@@ -776,21 +598,14 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
-  // Initialize Telegram (non-blocking)
   initTelegram();
 
-  // Initialize WhatsApp (optional, won't fail if not authenticated)
-  const whatsappConnected = await connectWhatsApp();
-
-  // Check that at least one channel is available
-  if (!whatsappConnected && !isTelegramConnected()) {
-    logger.error('No channels available. Set up at least WhatsApp or Telegram.');
+  if (!isTelegramConnected()) {
+    logger.error('Telegram not configured. Set TELEGRAM_BOT_TOKEN in .env');
     console.error('\n╔════════════════════════════════════════════════════════════════╗');
-    console.error('║  FATAL: No messaging channels configured                       ║');
+    console.error('║  FATAL: Telegram not configured                                ║');
     console.error('║                                                                ║');
-    console.error('║  Set up at least one channel:                                  ║');
-    console.error('║  - WhatsApp: Run `npm run auth` to authenticate                ║');
-    console.error('║  - Telegram: Set TELEGRAM_BOT_TOKEN in .env                    ║');
+    console.error('║  Set TELEGRAM_BOT_TOKEN in .env                                ║');
     console.error('╚════════════════════════════════════════════════════════════════╝\n');
     process.exit(1);
   }

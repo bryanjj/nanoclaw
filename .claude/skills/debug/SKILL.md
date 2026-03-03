@@ -30,7 +30,7 @@ src/container-runner.ts               container/agent-runner/
 
 | Log | Location | Content |
 |-----|----------|---------|
-| **Main app logs** | `logs/nanoclaw.log` | Host-side WhatsApp, routing, container spawning |
+| **Main app logs** | `logs/nanoclaw.log` | Host-side Telegram, routing, container spawning |
 | **Main app errors** | `logs/nanoclaw.error.log` | Host-side errors |
 | **Container run logs** | `groups/{folder}/logs/container-*.log` | Per-run: input, mounts, stderr, stdout |
 | **Claude sessions** | `~/.claude/projects/` | Claude Code session history |
@@ -118,10 +118,10 @@ Expected structure:
 ├── project/              # Project root (main channel only)
 ├── global/               # Global CLAUDE.md (non-main only)
 ├── ipc/                  # Inter-process communication
-│   ├── messages/         # Outgoing WhatsApp messages
+│   ├── messages/         # Outgoing Telegram messages
 │   ├── tasks/            # Scheduled task commands
 │   ├── current_tasks.json    # Read-only: scheduled tasks visible to this group
-│   └── available_groups.json # Read-only: WhatsApp groups for activation (main only)
+│   └── available_groups.json # Read-only: Telegram groups for activation (main only)
 └── extra/                # Additional custom mounts
 ```
 
@@ -182,7 +182,7 @@ mkdir -p data/env groups/test
 cp .env data/env/env
 
 # Run test query
-echo '{"prompt":"What is 2+2?","groupFolder":"test","chatJid":"test@g.us","isMain":false}' | \
+echo '{"prompt":"What is 2+2?","groupFolder":"test","chatJid":"test@telegram","isMain":false}' | \
   container run -i \
   --mount "type=bind,source=$(pwd)/data/env,target=/workspace/env-dir,readonly" \
   -v $(pwd)/groups/test:/workspace/group \
@@ -308,10 +308,10 @@ cat data/ipc/{groupFolder}/current_tasks.json
 ```
 
 **IPC file types:**
-- `messages/*.json` - Agent writes: outgoing WhatsApp messages
+- `messages/*.json` - Agent writes: outgoing Telegram messages
 - `tasks/*.json` - Agent writes: task operations (schedule, pause, resume, cancel, refresh_groups)
 - `current_tasks.json` - Host writes: read-only snapshot of scheduled tasks
-- `available_groups.json` - Host writes: read-only list of WhatsApp groups (main only)
+- `available_groups.json` - Host writes: read-only list of Telegram groups (main only)
 
 ## Quick Diagnostic Script
 

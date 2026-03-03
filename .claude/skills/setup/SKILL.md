@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Run initial NanoClaw setup. Use when user wants to install dependencies, authenticate WhatsApp, register their main channel, or start the background services. Triggers on "setup", "install", "configure nanoclaw", or first-time setup requests.
+description: Run initial NanoClaw setup. Use when user wants to install dependencies, configure Telegram, register their main channel, or start the background services. Triggers on "setup", "install", "configure nanoclaw", or first-time setup requests.
 ---
 
 # NanoClaw Setup
@@ -137,25 +137,26 @@ else
 fi
 ```
 
-## 5. WhatsApp Authentication
+## 5. Configure Telegram Bot
 
-**USER ACTION REQUIRED**
+Ask the user:
+> Do you have a Telegram bot token? If not, I'll walk you through creating one.
 
-Run the authentication script:
+If they need to create one:
+> 1. Open Telegram and message **@BotFather**
+> 2. Send `/newbot`
+> 3. Follow the prompts to name your bot
+> 4. Copy the bot token (looks like `123456:ABC-DEF...`)
 
+Once they have the token:
 ```bash
-npm run auth
+echo "TELEGRAM_BOT_TOKEN=<token>" >> .env
 ```
 
-Tell the user:
-> A QR code will appear. On your phone:
-> 1. Open WhatsApp
-> 2. Tap **Settings → Linked Devices → Link a Device**
-> 3. Scan the QR code
-
-Wait for the script to output "Successfully authenticated" then continue.
-
-If it says "Already authenticated", skip to the next step.
+Verify:
+```bash
+grep "^TELEGRAM_BOT_TOKEN=" .env && echo "Token configured" || echo "Missing"
+```
 
 ## 6. Configure Assistant Name
 
@@ -174,13 +175,13 @@ Store their choice - you'll use it when creating the registered_groups.json and 
 ## 7. Register Main Channel
 
 Ask the user:
-> Do you want to use your **personal chat** (message yourself) or a **WhatsApp group** as your main control channel?
+> Do you want to use your **private chat with the bot** or a **Telegram group** as your main control channel?
 
-For personal chat:
-> Send any message to yourself in WhatsApp (the "Message Yourself" chat). Tell me when done.
+For private chat:
+> Send any message to your bot in Telegram. Tell me when done.
 
 For group:
-> Send any message in the WhatsApp group you want to use as your main channel. Tell me when done.
+> Add the bot to a Telegram group and send a message. Tell me when done.
 
 After user confirms, start the app briefly to capture the message:
 
@@ -191,11 +192,7 @@ timeout 10 npm run dev || true
 Then find the JID from the database:
 
 ```bash
-# For personal chat (ends with @s.whatsapp.net)
-sqlite3 store/messages.db "SELECT DISTINCT chat_jid FROM messages WHERE chat_jid LIKE '%@s.whatsapp.net' ORDER BY timestamp DESC LIMIT 5"
-
-# For group (ends with @g.us)
-sqlite3 store/messages.db "SELECT DISTINCT chat_jid FROM messages WHERE chat_jid LIKE '%@g.us' ORDER BY timestamp DESC LIMIT 5"
+sqlite3 store/messages.db "SELECT DISTINCT chat_jid FROM messages WHERE chat_jid LIKE '%@telegram' ORDER BY timestamp DESC LIMIT 5"
 ```
 
 Create/update `data/registered_groups.json` using the JID from above and the assistant name from step 5:
@@ -262,7 +259,7 @@ For each directory they provide, ask:
 ### 8b. Configure Non-Main Group Access
 
 Ask the user:
-> Should **non-main groups** (other WhatsApp chats you add later) be restricted to **read-only** access even if read-write is allowed for the directory?
+> Should **non-main groups** (other Telegram chats you add later) be restricted to **read-only** access even if read-write is allowed for the directory?
 >
 > Recommended: **Yes** - this prevents other groups from modifying files even if you grant them access to a directory.
 
@@ -392,7 +389,7 @@ Check the logs:
 tail -f logs/nanoclaw.log
 ```
 
-The user should receive a response in WhatsApp.
+The user should receive a response in Telegram.
 
 ## Troubleshooting
 
@@ -409,9 +406,9 @@ The user should receive a response in WhatsApp.
 - Check that the chat JID is in `data/registered_groups.json`
 - Check `logs/nanoclaw.log` for errors
 
-**WhatsApp disconnected**:
-- The service will show a macOS notification
-- Run `npm run auth` to re-authenticate
+**Telegram disconnected**:
+- Check that `TELEGRAM_BOT_TOKEN` is set in `.env`
+- Verify the token with BotFather
 - Restart the service: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw`
 
 **Unload service**:

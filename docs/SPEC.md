@@ -1,6 +1,6 @@
 # NanoClaw Specification
 
-A personal Claude assistant accessible via WhatsApp, with persistent memory per conversation, scheduled tasks, and email integration.
+A personal Claude assistant accessible via Telegram, with persistent memory per conversation, scheduled tasks, and email integration.
 
 ---
 
@@ -29,8 +29,8 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  ┌──────────────┐                     ┌────────────────────┐        │
-│  │  WhatsApp    │────────────────────▶│   SQLite Database  │        │
-│  │  (baileys)   │◀────────────────────│   (messages.db)    │        │
+│  │  Telegram    │────────────────────▶│   SQLite Database  │        │
+│  │  (bot API)   │◀────────────────────│   (messages.db)    │        │
 │  └──────────────┘   store/send        └─────────┬──────────┘        │
 │                                                  │                   │
 │         ┌────────────────────────────────────────┘                   │
@@ -73,7 +73,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| WhatsApp Connection | Node.js (@whiskeysockets/baileys) | Connect to WhatsApp, send/receive messages |
+| Telegram Connection | Node.js (node-telegram-bot-api) | Connect to Telegram, send/receive messages |
 | Message Storage | SQLite (better-sqlite3) | Store messages for polling |
 | Container Runtime | Apple Container | Isolated Linux VMs for agent execution |
 | Agent | @anthropic-ai/claude-agent-sdk (0.2.29) | Run Claude with tools and MCP servers |
@@ -98,12 +98,12 @@ nanoclaw/
 ├── .gitignore
 │
 ├── src/
-│   ├── index.ts                   # Main application (WhatsApp + routing)
+│   ├── index.ts                   # Main application (message routing)
 │   ├── config.ts                  # Configuration constants
 │   ├── types.ts                   # TypeScript interfaces
 │   ├── utils.ts                   # Generic utility functions
 │   ├── db.ts                      # Database initialization and queries
-│   ├── whatsapp-auth.ts           # Standalone WhatsApp authentication
+│   ├── telegram.ts                # Telegram bot connection and message handling
 │   ├── task-scheduler.ts          # Runs scheduled tasks when due
 │   └── container-runner.ts        # Spawns agents in Apple Containers
 │
@@ -141,7 +141,6 @@ nanoclaw/
 │       └── *.md                   # Files created by the agent
 │
 ├── store/                         # Local data (gitignored)
-│   ├── auth/                      # WhatsApp authentication state
 │   └── messages.db                # SQLite database (messages, scheduled_tasks, task_run_logs)
 │
 ├── data/                          # Application state (gitignored)
@@ -195,7 +194,7 @@ Groups can have additional directories mounted via `containerConfig` in `data/re
 
 ```json
 {
-  "1234567890@g.us": {
+  "1234567890@telegram": {
     "name": "Dev Team",
     "folder": "dev-team",
     "trigger": "@Andy",
@@ -203,7 +202,7 @@ Groups can have additional directories mounted via `containerConfig` in `data/re
     "containerConfig": {
       "additionalMounts": [
         {
-          "hostPath": "/Users/gavriel/projects/webapp",
+          "hostPath": "/Users/bryan/projects/webapp",
           "containerPath": "webapp",
           "readonly": false
         }
@@ -314,10 +313,10 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 ### Incoming Message Flow
 
 ```
-1. User sends WhatsApp message
+1. User sends Telegram message
    │
    ▼
-2. Baileys receives message via WhatsApp Web protocol
+2. Telegram bot receives message via Bot API
    │
    ▼
 3. Message stored in SQLite (store/messages.db)
@@ -349,7 +348,7 @@ Sessions enable conversation continuity - Claude remembers what you talked about
    └── Uses tools as needed (search, email, etc.)
    │
    ▼
-9. Router prefixes response with assistant name and sends via WhatsApp
+9. Agent sends response via Telegram using send_message tool
    │
    ▼
 10. Router updates last agent timestamp and saves session ID
@@ -473,7 +472,7 @@ The `nanoclaw` MCP server is created dynamically per agent call with the current
 | `pause_task` | Pause a task |
 | `resume_task` | Resume a paused task |
 | `cancel_task` | Delete a task |
-| `send_message` | Send a WhatsApp message to the group |
+| `send_message` | Send a Telegram message to the chat |
 
 ---
 
@@ -487,7 +486,7 @@ When NanoClaw starts, it:
 1. **Ensures Apple Container system is running** - Automatically starts it if needed (survives reboots)
 2. Initializes the SQLite database
 3. Loads state (registered groups, sessions, router state)
-4. Connects to WhatsApp
+4. Connects to Telegram
 5. Starts the message polling loop
 6. Starts the scheduler loop
 7. Starts the IPC watcher for container messages
@@ -564,7 +563,7 @@ All agents run inside Apple Container (lightweight Linux VMs), providing:
 
 ### Prompt Injection Risk
 
-WhatsApp messages could contain malicious instructions attempting to manipulate Claude's behavior.
+Messages could contain malicious instructions attempting to manipulate Claude's behavior.
 
 **Mitigations:**
 - Container isolation limits blast radius
@@ -585,7 +584,7 @@ WhatsApp messages could contain malicious instructions attempting to manipulate 
 | Credential | Storage Location | Notes |
 |------------|------------------|-------|
 | Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/ |
-| WhatsApp Session | store/auth/ | Auto-created, persists ~20 days |
+| Telegram Bot Token | .env | Set TELEGRAM_BOT_TOKEN |
 
 ### File Permissions
 
@@ -607,7 +606,7 @@ chmod 700 groups/
 | "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
 | Session not continuing | Session ID not saved | Check `data/sessions.json` |
 | Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
-| "QR code expired" | WhatsApp session expired | Delete store/auth/ and restart |
+| "Telegram not configured" | Bot token missing | Set TELEGRAM_BOT_TOKEN in .env |
 | "No groups registered" | Haven't added groups | Use `@Andy add group "Name"` in main |
 
 ### Log Location
