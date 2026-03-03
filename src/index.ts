@@ -506,9 +506,7 @@ async function processTaskIpc(
         }
 
         const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const contextMode = (data.context_mode === 'group' || data.context_mode === 'isolated')
-          ? data.context_mode
-          : 'isolated';
+        const contextMode = 'group';
         createTask({
           id: taskId,
           group_folder: targetGroup,
@@ -711,16 +709,16 @@ async function startMessageLoop(): Promise<void> {
       for (const msg of messages) {
         const group = registeredGroups[msg.chat_jid];
         if (group) {
-          // Enqueue per group — serializes container runs for the same group
-          // while allowing different groups to process in parallel.
-          // Don't await — advance the polling cursor immediately.
-          groupQueue.enqueue(group.folder, async () => {
-            try {
-              await processMessage(msg);
-            } catch (err) {
-              logger.error({ err, msg: msg.id }, 'Error processing message');
-            }
-          });
+          // Skip messages sent by the bot — prevents ghost sessions
+          if (msg.sender_name !== ASSISTANT_NAME) {
+            groupQueue.enqueue(group.folder, async () => {
+              try {
+                await processMessage(msg);
+              } catch (err) {
+                logger.error({ err, msg: msg.id }, 'Error processing message');
+              }
+            });
+          }
         }
         // Advance polling cursor so we don't re-discover this message
         lastTimestamp = msg.timestamp;
