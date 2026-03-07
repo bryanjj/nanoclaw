@@ -13,6 +13,38 @@ const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } }
 });
 
+/**
+ * Compute the next run time for a recurring task, anchored to the
+ * task's scheduled time rather than Date.now() to prevent cumulative drift.
+ */
+export function computeNextRun(task: Pick<ScheduledTask, 'id' | 'schedule_type' | 'schedule_value' | 'next_run'>): string | null {
+  if (task.schedule_type === 'once') return null;
+
+  const now = Date.now();
+
+  if (task.schedule_type === 'cron') {
+    const interval = CronExpressionParser.parse(task.schedule_value, { tz: TIMEZONE });
+    return interval.next().toISOString();
+  }
+
+  if (task.schedule_type === 'interval') {
+    const ms = parseInt(task.schedule_value, 10);
+    if (!ms || ms <= 0) {
+      logger.warn({ taskId: task.id, value: task.schedule_value }, 'Invalid interval value');
+      return new Date(now + 60_000).toISOString();
+    }
+    // Anchor to the scheduled time, not now, to prevent drift.
+    // Skip past any missed intervals so we always land in the future.
+    let next = new Date(task.next_run!).getTime() + ms;
+    while (next <= now) {
+      next += ms;
+    }
+    return new Date(next).toISOString();
+  }
+
+  return null;
+}
+
 export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -21,22 +53,29 @@ export interface SchedulerDependencies {
   queue: GroupQueue;
 }
 
-async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
+async function runTask(task: ScheduledTask, nextRun: string | null, deps: SchedulerDependencies): Promise<void> {
   const startTime = Date.now();
+
+  const finalize = (error: string | null, result: string | null = null) => {
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: error ? 'error' : 'success',
+      result,
+      error
+    });
+    const resultSummary = error ? `Error: ${error}` : (result ? result.slice(0, 200) : 'Completed');
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  };
+
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, groupFolder: task.group_folder, error }, 'Task has invalid group folder');
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error
-    });
+    finalize(error);
     return;
   }
   fs.mkdirSync(groupDir, { recursive: true });
@@ -47,15 +86,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
   const group = Object.values(groups).find(g => g.folder === task.group_folder);
 
   if (!group) {
+    const error = `Group not found: ${task.group_folder}`;
     logger.error({ taskId: task.id, groupFolder: task.group_folder }, 'Group not found for task');
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error: `Group not found: ${task.group_folder}`
-    });
+    finalize(error);
     return;
   }
 
@@ -71,19 +104,6 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     status: t.status,
     next_run: t.next_run
   })));
-
-  // Pre-claim: advance next_run before execution so the scheduler
-  // won't pick this task up again while it's running
-  let nextRun: string | null = null;
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, { tz: 'UTC' });
-    nextRun = interval.next().toISOString();
-  } else if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    nextRun = new Date(Date.now() + ms).toISOString();
-  }
-  // 'once' tasks: nextRun stays null, so they won't be picked up again
-  claimTask(task.id, nextRun);
 
   let result: string | null = null;
   let error: string | null = null;
@@ -120,22 +140,17 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
-  const durationMs = Date.now() - startTime;
-
-  logTaskRun({
-    task_id: task.id,
-    run_at: new Date().toISOString(),
-    duration_ms: durationMs,
-    status: error ? 'error' : 'success',
-    result,
-    error
-  });
-
-  const resultSummary = error ? `Error: ${error}` : (result ? result.slice(0, 200) : 'Completed');
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  finalize(error, result);
 }
 
+let schedulerRunning = false;
+
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
+  if (schedulerRunning) {
+    logger.debug('Scheduler loop already running, skipping duplicate start');
+    return;
+  }
+  schedulerRunning = true;
   logger.info('Scheduler loop started');
 
   const loop = async () => {
@@ -152,8 +167,14 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        // Claim task BEFORE enqueuing to prevent the next poll from
+        // picking it up again while it waits in the queue
+        const nextRun = computeNextRun(currentTask);
+        claimTask(currentTask.id, nextRun);
+
         // Enqueue per group — serializes with message processing
-        deps.queue.enqueue(currentTask.group_folder, () => runTask(currentTask, deps));
+        deps.queue.enqueue(currentTask.group_folder, () => runTask(currentTask, nextRun, deps))
+          .catch(err => logger.error({ taskId: currentTask.id, err }, 'Unhandled error in scheduled task'));
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
@@ -163,4 +184,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   };
 
   loop();
+}
+
+/** @internal — for tests only. */
+export function _resetSchedulerLoopForTests(): void {
+  schedulerRunning = false;
 }

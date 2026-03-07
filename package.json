@@ -8,19 +8,18 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",
-
     "better-sqlite3": "^11.8.1",
     "cron-parser": "^5.5.0",
     "dotenv": "^17.2.3",
     "node-telegram-bot-api": "^0.67.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
-
     "ws": "^8.19.0",
     "zod": "^4.3.6"
   },
@@ -28,9 +27,9 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
     "@types/node-telegram-bot-api": "^0.64.13",
-
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
   },
   "engines": {
     "node": ">=20"

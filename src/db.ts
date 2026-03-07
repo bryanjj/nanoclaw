@@ -6,16 +6,13 @@ import { STORE_DIR } from './config.js';
 
 let db: Database.Database;
 
-export function initDatabase(): void {
-  const dbPath = path.join(STORE_DIR, 'messages.db');
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-
-  db = new Database(dbPath);
-  db.exec(`
+function createSchema(instance: Database.Database): void {
+  instance.exec(`
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
       name TEXT,
-      last_message_time TEXT
+      last_message_time TEXT,
+      channel TEXT
     );
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT,
@@ -25,6 +22,7 @@ export function initDatabase(): void {
       content TEXT,
       timestamp TEXT,
       is_from_me INTEGER,
+      channel TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -37,6 +35,7 @@ export function initDatabase(): void {
       prompt TEXT NOT NULL,
       schedule_type TEXT NOT NULL,
       schedule_value TEXT NOT NULL,
+      context_mode TEXT DEFAULT 'group',
       next_run TEXT,
       last_run TEXT,
       last_result TEXT,
@@ -57,54 +56,7 @@ export function initDatabase(): void {
       FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
-  `);
 
-  // Add sender_name column if it doesn't exist (migration for existing DBs)
-  try {
-    db.exec(`ALTER TABLE messages ADD COLUMN sender_name TEXT`);
-  } catch { /* column already exists */ }
-
-  // Add context_mode column if it doesn't exist (migration for existing DBs)
-  try {
-    db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'group'`);
-  } catch { /* column already exists */ }
-
-  // Add channel column if it doesn't exist (migration for existing DBs)
-  try {
-    db.exec(`ALTER TABLE messages ADD COLUMN channel TEXT DEFAULT 'telegram'`);
-  } catch { /* column already exists */ }
-
-  // Add channel column to chats if it doesn't exist
-  try {
-    db.exec(`ALTER TABLE chats ADD COLUMN channel TEXT DEFAULT 'telegram'`);
-  } catch { /* column already exists */ }
-
-  // FTS5 on messages for full-text search
-  try {
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
-        USING fts5(content, content='messages', content_rowid='rowid');
-
-      CREATE TRIGGER IF NOT EXISTS messages_ai
-        AFTER INSERT ON messages BEGIN
-          INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-        END;
-
-      CREATE TRIGGER IF NOT EXISTS messages_ad
-        AFTER DELETE ON messages BEGIN
-          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-        END;
-
-      CREATE TRIGGER IF NOT EXISTS messages_au
-        AFTER UPDATE ON messages BEGIN
-          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-          INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-        END;
-    `);
-  } catch { /* FTS table already exists */ }
-
-  // Thought history tables
-  db.exec(`
     CREATE TABLE IF NOT EXISTS thought_sessions (
       id                    TEXT PRIMARY KEY,
       chat_jid              TEXT,
@@ -132,10 +84,28 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_thought_sessions_trigger_msg ON thought_sessions(trigger_msg_id);
   `);
 
-  // FTS5 virtual table for full-text search over thinking content
-  // Wrapped in try/catch since CREATE VIRTUAL TABLE IF NOT EXISTS can still fail on some SQLite versions
+  // FTS5 tables
   try {
-    db.exec(`
+    instance.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+        USING fts5(content, content='messages', content_rowid='rowid');
+
+      CREATE TRIGGER IF NOT EXISTS messages_ai
+        AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS messages_ad
+        AFTER DELETE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS messages_au
+        AFTER UPDATE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+          INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+
       CREATE VIRTUAL TABLE IF NOT EXISTS thought_blocks_fts
         USING fts5(thinking, content='thought_blocks', content_rowid='rowid');
 
@@ -155,7 +125,27 @@ export function initDatabase(): void {
           INSERT INTO thought_blocks_fts(rowid, thinking) VALUES (new.rowid, new.thinking);
         END;
     `);
-  } catch { /* FTS table already exists */ }
+  } catch { /* FTS tables already exist */ }
+}
+
+export function initDatabase(): void {
+  const dbPath = path.join(STORE_DIR, 'messages.db');
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+  db = new Database(dbPath);
+  createSchema(db);
+
+  // Migrations for existing DBs — columns already in createSchema for new DBs
+  try { db.exec(`ALTER TABLE messages ADD COLUMN sender_name TEXT`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'group'`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE messages ADD COLUMN channel TEXT DEFAULT 'telegram'`); } catch { /* exists */ }
+  try { db.exec(`ALTER TABLE chats ADD COLUMN channel TEXT DEFAULT 'telegram'`); } catch { /* exists */ }
+}
+
+/** @internal — for tests only. Replaces db with a fresh in-memory instance. */
+export function _initTestDatabase(): void {
+  db = new Database(':memory:');
+  createSchema(db);
 }
 
 /**
