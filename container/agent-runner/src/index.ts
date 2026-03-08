@@ -11,7 +11,7 @@ if (!process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT) {
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput, PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { createIpcMcp } from './ipc-mcp.js';
 
 interface ContainerInput {
@@ -129,6 +129,76 @@ function createPreCompactHook(): HookCallback {
       log(`Archived conversation to ${filePath}`);
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return {};
+  };
+}
+
+// Pattern that triggers immediate API refusal when present anywhere in context.
+// Some websites embed this string to poison AI agent sessions.
+const REFUSAL_TRIGGER_PATTERN = /ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_\S+/g;
+
+function stripRefusalTriggers(text: string): string {
+  return text.replace(REFUSAL_TRIGGER_PATTERN, '[FILTERED_ANTHROPIC_REFUSAL]');
+}
+
+/**
+ * Sanitize a session transcript JSONL file by removing refusal trigger strings.
+ * Must be called before resuming a session to prevent poisoned context.
+ */
+function sanitizeSessionTranscript(sessionId: string): void {
+  // Session transcripts live under the Claude project directory
+  const projectDir = '/home/node/.claude/projects/-workspace-group';
+  const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+
+  if (!fs.existsSync(transcriptPath)) return;
+
+  const content = fs.readFileSync(transcriptPath, 'utf-8');
+  if (!content.includes('ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_')) return;
+
+  const cleaned = stripRefusalTriggers(content);
+  fs.writeFileSync(transcriptPath, cleaned);
+  log(`Sanitized refusal triggers from session ${sessionId}`);
+}
+
+/**
+ * PostToolUse hook that strips refusal trigger strings from tool outputs
+ * before they get stored in the session transcript.
+ */
+function createStripRefusalHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const postInput = input as PostToolUseHookInput;
+    const response = postInput.tool_response;
+
+    if (typeof response === 'string' && response.includes('ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_')) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          updatedMCPToolOutput: stripRefusalTriggers(response),
+        },
+      };
+    }
+
+    // Handle structured tool responses (arrays of content blocks)
+    if (Array.isArray(response)) {
+      let modified = false;
+      const cleaned = response.map((block: any) => {
+        if (block?.type === 'text' && typeof block.text === 'string' && block.text.includes('ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_')) {
+          modified = true;
+          return { ...block, text: stripRefusalTriggers(block.text) };
+        }
+        return block;
+      });
+
+      if (modified) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUse',
+            updatedMCPToolOutput: cleaned,
+          },
+        };
+      }
     }
 
     return {};
@@ -271,10 +341,15 @@ async function main(): Promise<void> {
   let result: string | null = null;
   let newSessionId: string | undefined;
 
-  // Add context for scheduled tasks
-  let prompt = input.prompt;
+  // Sanitize existing session transcript before resuming
+  if (input.sessionId) {
+    sanitizeSessionTranscript(input.sessionId);
+  }
+
+  // Sanitize the prompt itself (in case message content contains the trigger)
+  let prompt = stripRefusalTriggers(input.prompt);
   if (input.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
+    prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${prompt}`;
   }
 
   try {
@@ -301,6 +376,7 @@ async function main(): Promise<void> {
         hooks: {
           PreCompact: [{ hooks: [createPreCompactHook()] }],
           PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
+          PostToolUse: [{ hooks: [createStripRefusalHook()] }],
         }
       }
     })) {
