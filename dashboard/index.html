@@ -192,7 +192,7 @@
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'history') {
-            msg.events.forEach(ev => addEvent(ev, false));
+            msg.events.slice().reverse().forEach(ev => addEvent(ev, true));
           } else if (msg.type === 'event') {
             addEvent(msg.event, true);
           }
