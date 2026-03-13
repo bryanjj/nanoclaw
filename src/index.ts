@@ -145,7 +145,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
     timestamp: new Date().toISOString(),
     groupFolder: group.folder,
     chatJid: msg.chat_jid,
-    data: { sender: msg.sender_name, preview: msg.content.slice(0, 50) }
+    data: { sender: msg.sender_name, preview: msg.content }
   });
 
   await setTyping(msg.chat_jid, true);
