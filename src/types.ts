@@ -44,10 +44,6 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
 }
 
-export interface Session {
-  [folder: string]: string;
-}
-
 export interface NewMessage {
   id: string;
   chat_jid: string;

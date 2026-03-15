@@ -16,7 +16,6 @@ import { createIpcMcp } from './ipc-mcp.js';
 
 interface ContainerInput {
   prompt: string;
-  sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
@@ -27,9 +26,8 @@ interface ContainerInput {
 interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
-  newSessionId?: string;
   error?: string;
-  messagesSent?: number;  // Number of IPC messages sent during execution
+  messagesSent?: number;
 }
 
 interface SessionEntry {
@@ -141,25 +139,6 @@ const REFUSAL_TRIGGER_PATTERN = /ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_\S+/g;
 
 function stripRefusalTriggers(text: string): string {
   return text.replace(REFUSAL_TRIGGER_PATTERN, '[FILTERED_ANTHROPIC_REFUSAL]');
-}
-
-/**
- * Sanitize a session transcript JSONL file by removing refusal trigger strings.
- * Must be called before resuming a session to prevent poisoned context.
- */
-function sanitizeSessionTranscript(sessionId: string): void {
-  // Session transcripts live under the Claude project directory
-  const projectDir = '/home/node/.claude/projects/-workspace-group';
-  const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
-
-  if (!fs.existsSync(transcriptPath)) return;
-
-  const content = fs.readFileSync(transcriptPath, 'utf-8');
-  if (!content.includes('ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_')) return;
-
-  const cleaned = stripRefusalTriggers(content);
-  fs.writeFileSync(transcriptPath, cleaned);
-  log(`Sanitized refusal triggers from session ${sessionId}`);
 }
 
 /**
@@ -339,12 +318,6 @@ async function main(): Promise<void> {
   });
 
   let result: string | null = null;
-  let newSessionId: string | undefined;
-
-  // Sanitize existing session transcript before resuming
-  if (input.sessionId) {
-    sanitizeSessionTranscript(input.sessionId);
-  }
 
   // Sanitize the prompt itself (in case message content contains the trigger)
   let prompt = stripRefusalTriggers(input.prompt);
@@ -359,7 +332,6 @@ async function main(): Promise<void> {
       prompt,
       options: {
         cwd: '/workspace/group',
-        resume: input.sessionId,
         allowedTools: [
           'Bash',
           'Read', 'Write', 'Edit', 'Glob', 'Grep',
@@ -389,11 +361,6 @@ async function main(): Promise<void> {
         event: message
       })}`);
 
-      if (message.type === 'system' && message.subtype === 'init') {
-        newSessionId = message.session_id;
-        log(`Session initialized: ${newSessionId}`);
-      }
-
       if ('result' in message && message.result) {
         result = message.result as string;
       }
@@ -403,7 +370,6 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'success',
       result,
-      newSessionId,
       messagesSent: messagesSentCounter.value
     });
 
@@ -413,7 +379,6 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'error',
       result: null,
-      newSessionId,
       error: errorMessage
     });
     process.exit(1);

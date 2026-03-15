@@ -15,9 +15,9 @@ import {
   TIMEZONE,
   DASHBOARD_ENABLED
 } from './config.js';
-import { RegisteredGroup, Session, NewMessage } from './types.js';
+import { RegisteredGroup, NewMessage } from './types.js';
 import crypto from 'crypto';
-import { initDatabase, storeGenericMessage, getNewMessages, getMessagesSince, getAllTasks, getTaskById, getAllChats } from './db.js';
+import { initDatabase, storeGenericMessage, getNewMessages, getMessagesSince, getAllTasks, getTaskById, getAllChats, getRecentMessages, getRecentThoughts } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -34,7 +34,6 @@ const logger = pino({
 });
 
 let lastTimestamp = '';
-let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 const groupQueue = new GroupQueue();
@@ -53,7 +52,6 @@ function loadState(): void {
   const state = loadJson<{ last_timestamp?: string; last_agent_timestamp?: Record<string, string> }>(statePath, {});
   lastTimestamp = state.last_timestamp || '';
   lastAgentTimestamp = state.last_agent_timestamp || {};
-  sessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
   registeredGroups = loadJson(path.join(DATA_DIR, 'registered_groups.json'), {});
 
   // Ensure all groups have a channel set
@@ -68,7 +66,6 @@ function loadState(): void {
 
 function saveState(): void {
   saveJson(path.join(DATA_DIR, 'router_state.json'), { last_timestamp: lastTimestamp, last_agent_timestamp: lastAgentTimestamp });
-  saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -124,18 +121,19 @@ async function processMessage(msg: NewMessage): Promise<void> {
   const sinceTimestamp = lastAgentTimestamp[msg.chat_jid] || '';
   const missedMessages = getMessagesSince(msg.chat_jid, sinceTimestamp, ASSISTANT_NAME);
 
+  // All messages already handled by a prior queued container run — skip
+  if (missedMessages.length === 0) {
+    logger.info({ group: group.name }, 'No new messages since last agent run, skipping');
+    return;
+  }
+
+  // Track the latest message timestamp so subsequent queued runs don't re-process
+  const latestTimestamp = missedMessages[missedMessages.length - 1].timestamp;
+
   const lines = missedMessages.map(m => {
-    // Escape XML special characters in content
-    const escapeXml = (s: string) => s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
     return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
   });
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
-
-  if (!prompt) return;
 
   logger.info({ group: group.name, messageCount: missedMessages.length }, 'Processing message');
 
@@ -152,16 +150,69 @@ async function processMessage(msg: NewMessage): Promise<void> {
   const { response, messagesSent } = await runAgent(group, prompt, msg.chat_jid, msg.id);
   await setTyping(msg.chat_jid, false);
 
-  // Update timestamp if the agent did anything (sent messages or produced a result)
-  // Never forward the agent's result text — agents must use send_message explicitly
+  // Update timestamp to the latest gathered message (not just the trigger)
+  // This prevents subsequent queued containers from re-processing these messages
   if (response || messagesSent) {
-    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
+    lastAgentTimestamp[msg.chat_jid] = latestTimestamp;
   }
+}
+
+const CONTEXT_HISTORY_THOUGHT_CAP = 20000;
+const CONTEXT_HISTORY_MESSAGE_CAP = 30000;
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildContextPrefix(chatJid: string, groupFolder: string): string {
+  const sections: string[] = [];
+
+  // Recent messages: fetch newest-first, accumulate until cap, reverse to chronological
+  const rawMessages = getRecentMessages(chatJid, 500);
+  if (rawMessages.length > 0) {
+    let totalChars = 0;
+    const kept: typeof rawMessages = [];
+    for (const m of rawMessages) {
+      if (totalChars + m.content.length > CONTEXT_HISTORY_MESSAGE_CAP) break;
+      totalChars += m.content.length;
+      kept.push(m);
+    }
+    kept.reverse(); // chronological order
+    const msgLines = kept.map(m =>
+      `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`
+    );
+    sections.push(`<recent_messages>\n${msgLines.join('\n')}\n</recent_messages>`);
+  }
+
+  // Recent thoughts: fetch newest-first, accumulate until cap, reverse to chronological
+  const rawThoughts = getRecentThoughts(groupFolder, 100);
+  if (rawThoughts.length > 0) {
+    let totalChars = 0;
+    const kept: typeof rawThoughts = [];
+    for (const session of rawThoughts) {
+      const thinking = session.blocks.map(b => b.thinking).join('\n');
+      if (totalChars + thinking.length > CONTEXT_HISTORY_THOUGHT_CAP) break;
+      totalChars += thinking.length;
+      kept.push(session);
+    }
+    kept.reverse(); // chronological order
+    const thoughtLines = kept.map(session => {
+      const thinking = session.blocks.map(b => b.thinking).join('\n');
+      return `<thought trigger="${escapeXml(session.triggerType)}" time="${session.startedAt}">\n${thinking}\n</thought>`;
+    });
+    sections.push(`<recent_thoughts>\n${thoughtLines.join('\n')}\n</recent_thoughts>`);
+  }
+
+  if (sections.length === 0) return '';
+  return `<context_history>\n${sections.join('\n\n')}\n</context_history>\n\n`;
 }
 
 async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string, triggerMsgId?: string): Promise<{ response: string | null; messagesSent: number }> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -179,21 +230,19 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string,
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(group.folder, isMain, availableGroups, new Set(Object.keys(registeredGroups)));
 
+  // Prepend context history (recent messages + thoughts) for fresh session awareness
+  const contextPrefix = buildContextPrefix(chatJid, group.folder);
+  const fullPrompt = contextPrefix + prompt;
+
   try {
     const output = await runContainerAgent(group, {
-      prompt,
-      sessionId,
+      prompt: fullPrompt,
       groupFolder: group.folder,
       chatJid,
       isMain,
       triggerType: 'user_message',
       triggerMsgId
     });
-
-    if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
-    }
 
     if (output.status === 'error') {
       logger.error({ group: group.name, error: output.error }, 'Container agent error');
@@ -545,23 +594,30 @@ async function startMessageLoop(): Promise<void> {
       const { messages } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
 
       if (messages.length > 0) logger.info({ count: messages.length }, 'New messages');
+
+      // Deduplicate: only enqueue the LAST message per group per poll cycle.
+      // processMessage already gathers all missed messages since the last agent
+      // interaction, so processing each message individually would cause
+      // near-duplicate agent runs.
+      const lastPerGroup = new Map<string, NewMessage>();
       for (const msg of messages) {
         const group = registeredGroups[msg.chat_jid];
-        if (group) {
-          // Skip messages sent by the bot — prevents ghost sessions
-          if (msg.sender_name !== ASSISTANT_NAME) {
-            groupQueue.enqueue(group.folder, async () => {
-              try {
-                await processMessage(msg);
-              } catch (err) {
-                logger.error({ err, msg: msg.id }, 'Error processing message');
-              }
-            });
-          }
+        if (group && msg.sender_name !== ASSISTANT_NAME) {
+          lastPerGroup.set(group.folder, msg);
         }
         // Advance polling cursor so we don't re-discover this message
         lastTimestamp = msg.timestamp;
         saveState();
+      }
+
+      for (const [folder, msg] of lastPerGroup) {
+        groupQueue.enqueue(folder, async () => {
+          try {
+            await processMessage(msg);
+          } catch (err) {
+            logger.error({ err, msg: msg.id }, 'Error processing message');
+          }
+        });
       }
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
@@ -614,7 +670,66 @@ function initChannels(): void {
   }
 }
 
+const PID_FILE = path.join(DATA_DIR, 'nanoclaw.pid');
+
+function acquirePidLock(): void {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  if (fs.existsSync(PID_FILE)) {
+    const existingPid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10);
+    if (!isNaN(existingPid)) {
+      try {
+        // Signal 0 checks if process exists without killing it
+        process.kill(existingPid, 0);
+        logger.fatal({ existingPid }, 'Another NanoClaw instance is already running');
+        process.exit(1);
+      } catch {
+        // Process doesn't exist — stale PID file, safe to overwrite
+        logger.info({ stalePid: existingPid }, 'Removing stale PID file');
+      }
+    }
+  }
+
+  fs.writeFileSync(PID_FILE, String(process.pid));
+
+  const cleanup = () => {
+    try { fs.unlinkSync(PID_FILE); } catch {}
+  };
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+}
+
+function rotateLogs(): void {
+  const logDir = path.join(process.cwd(), 'logs');
+  const logFile = path.join(logDir, 'nanoclaw.log');
+  const errorLogFile = path.join(logDir, 'nanoclaw.error.log');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+  // Copy-then-truncate: launchd holds the FD open, so we can't rename.
+  // Copy the old content to a rotated file, then truncate the original.
+  for (const file of [logFile, errorLogFile]) {
+    if (fs.existsSync(file) && fs.statSync(file).size > 0) {
+      const ext = path.extname(file);
+      const base = path.basename(file, ext);
+      fs.copyFileSync(file, path.join(logDir, `${base}-${timestamp}${ext}`));
+      fs.truncateSync(file, 0);
+    }
+  }
+
+  // Keep only the 10 most recent rotated logs
+  const rotated = fs.readdirSync(logDir)
+    .filter(f => /^nanoclaw\.(log|error\.log)-/.test(f))
+    .sort()
+    .reverse();
+  for (const file of rotated.slice(10)) {
+    fs.unlinkSync(path.join(logDir, file));
+  }
+}
+
 async function main(): Promise<void> {
+  acquirePidLock();
+  rotateLogs();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
@@ -641,11 +756,7 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     sendMessage,
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
-    updateSession: (groupFolder, sessionId) => {
-      sessions[groupFolder] = sessionId;
-      saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
-    },
+    buildContextPrefix,
     queue: groupQueue
   });
   startIpcWatcher();

@@ -41,7 +41,6 @@ function getHomeDir(): string {
 
 export interface ContainerInput {
   prompt: string;
-  sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
@@ -55,7 +54,6 @@ export interface ContainerInput {
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
-  newSessionId?: string;
   error?: string;
   messagesSent?: number;
 }
@@ -223,7 +221,7 @@ export async function runContainerAgent(
     timestamp: new Date().toISOString(),
     groupFolder: group.folder,
     chatJid: input.chatJid,
-    data: { prompt: input.prompt.slice(0, 100) }
+    data: { prompt: input.prompt }
   });
 
   const logsDir = path.join(groupDir, 'logs');
@@ -384,7 +382,6 @@ export async function runContainerAgent(
         logLines.push(
           `=== Input Summary ===`,
           `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${input.sessionId || 'new'}`,
           ``,
           `=== Mounts ===`,
           mounts.map(m => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`).join('\n'),

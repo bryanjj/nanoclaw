@@ -48,8 +48,7 @@ export function computeNextRun(task: Pick<ScheduledTask, 'id' | 'schedule_type' 
 export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
-  updateSession: (groupFolder: string, sessionId: string) => void;
+  buildContextPrefix: (chatJid: string, groupFolder: string) => string;
   queue: GroupQueue;
 }
 
@@ -108,14 +107,13 @@ async function runTask(task: ScheduledTask, nextRun: string | null, deps: Schedu
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
-  const sessionId = sessions[task.group_folder];
+  // Prepend context history for fresh session awareness
+  const contextPrefix = deps.buildContextPrefix(task.chat_jid, task.group_folder);
+  const fullPrompt = contextPrefix + task.prompt;
 
   try {
     const output = await runContainerAgent(group, {
-      prompt: task.prompt,
-      sessionId,
+      prompt: fullPrompt,
       groupFolder: task.group_folder,
       chatJid: task.chat_jid,
       isMain,
@@ -123,10 +121,6 @@ async function runTask(task: ScheduledTask, nextRun: string | null, deps: Schedu
       triggerType: 'scheduled_task',
       taskId: task.id
     });
-
-    if (output.newSessionId) {
-      deps.updateSession(task.group_folder, output.newSessionId);
-    }
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';

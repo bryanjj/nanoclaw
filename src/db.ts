@@ -390,3 +390,57 @@ export function deleteThoughtSession(id: string): void {
   db.prepare('DELETE FROM thought_blocks WHERE session_id = ?').run(id);
   db.prepare('DELETE FROM thought_sessions WHERE id = ?').run(id);
 }
+
+// --- Context history queries ---
+
+export interface RecentMessage {
+  sender_name: string;
+  content: string;
+  timestamp: string;
+}
+
+/**
+ * Get recent messages newest-first (caller handles cap and reversal).
+ */
+export function getRecentMessages(chatJid: string, limit: number): RecentMessage[] {
+  return db.prepare(`
+    SELECT sender_name, content, timestamp
+    FROM messages
+    WHERE chat_jid = ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(chatJid, limit) as RecentMessage[];
+}
+
+export interface RecentThoughtSession {
+  sessionId: string;
+  triggerType: string;
+  triggerPreview: string;
+  startedAt: string;
+  blocks: { thinking: string }[];
+}
+
+/**
+ * Get recent thought sessions newest-first (caller handles cap and reversal).
+ */
+export function getRecentThoughts(groupFolder: string, limit: number): RecentThoughtSession[] {
+  const sessions = db.prepare(`
+    SELECT id, trigger_type, trigger_preview, started_at
+    FROM thought_sessions
+    WHERE group_folder = ?
+    ORDER BY started_at DESC
+    LIMIT ?
+  `).all(groupFolder, limit) as { id: string; trigger_type: string; trigger_preview: string; started_at: string }[];
+
+  return sessions.map(s => ({
+    sessionId: s.id,
+    triggerType: s.trigger_type,
+    triggerPreview: s.trigger_preview,
+    startedAt: s.started_at,
+    blocks: db.prepare(`
+      SELECT thinking FROM thought_blocks
+      WHERE session_id = ?
+      ORDER BY block_index
+    `).all(s.id) as { thinking: string }[]
+  }));
+}

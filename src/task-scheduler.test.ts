@@ -123,8 +123,7 @@ describe('task scheduler', () => {
       startSchedulerLoop({
         sendMessage: async () => {},
         registeredGroups: () => ({}),
-        getSessions: () => ({}),
-        updateSession: () => {},
+        buildContextPrefix: () => '',
         queue,
       });
 

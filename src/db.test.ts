@@ -18,6 +18,11 @@ import {
   storeGenericMessage,
   getMessagesSince,
   getNewMessages,
+  getRecentMessages,
+  getRecentThoughts,
+  createThoughtSession,
+  insertThoughtBlock,
+  finalizeThoughtSession,
 } from './db.js';
 
 beforeEach(() => {
@@ -303,5 +308,104 @@ describe('task run logs', () => {
     }
 
     expect(getTaskRunLogs('limit-task', 2)).toHaveLength(2);
+  });
+});
+
+// --- getRecentMessages ---
+
+describe('getRecentMessages', () => {
+  beforeEach(() => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    storeGenericMessage('m1', 'group@g.us', 'alice', 'Alice', 'first', '2024-01-01T00:00:01.000Z', false, 'telegram');
+    storeGenericMessage('m2', 'group@g.us', 'bot', 'Bot', 'Bot: reply', '2024-01-01T00:00:02.000Z', true, 'telegram');
+    storeGenericMessage('m3', 'group@g.us', 'bob', 'Bob', 'third', '2024-01-01T00:00:03.000Z', false, 'telegram');
+  });
+
+  it('returns messages newest-first', () => {
+    const msgs = getRecentMessages('group@g.us', 10);
+    expect(msgs).toHaveLength(3);
+    expect(msgs[0].sender_name).toBe('Bob');    // newest
+    expect(msgs[2].sender_name).toBe('Alice');   // oldest
+  });
+
+  it('includes bot messages (unlike getMessagesSince)', () => {
+    const msgs = getRecentMessages('group@g.us', 10);
+    const botMsgs = msgs.filter(m => m.sender_name === 'Bot');
+    expect(botMsgs).toHaveLength(1);
+  });
+
+  it('respects limit', () => {
+    const msgs = getRecentMessages('group@g.us', 2);
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0].sender_name).toBe('Bob');
+    expect(msgs[1].sender_name).toBe('Bot');
+  });
+
+  it('only returns messages for the given chat', () => {
+    storeChatMetadata('other@g.us', '2024-01-01T00:00:00.000Z');
+    storeGenericMessage('o1', 'other@g.us', 'dave', 'Dave', 'other chat', '2024-01-01T00:00:04.000Z', false, 'telegram');
+    const msgs = getRecentMessages('group@g.us', 100);
+    expect(msgs).toHaveLength(3);
+  });
+});
+
+// --- getRecentThoughts ---
+
+describe('getRecentThoughts', () => {
+  beforeEach(() => {
+    createThoughtSession({
+      id: 'session-1', chatJid: 'c', groupFolder: 'main',
+      triggerType: 'user_message', triggerPreview: 'hello',
+      startedAt: '2024-01-01T00:00:01.000Z',
+    });
+    insertThoughtBlock({ id: 'b1', sessionId: 'session-1', blockIndex: 0, timestamp: '2024-01-01T00:00:01.000Z', thinking: 'thinking about hello' });
+    insertThoughtBlock({ id: 'b2', sessionId: 'session-1', blockIndex: 1, timestamp: '2024-01-01T00:00:02.000Z', thinking: 'decided to respond' });
+    finalizeThoughtSession('session-1', 5000, 2, 100);
+
+    createThoughtSession({
+      id: 'session-2', chatJid: 'c', groupFolder: 'main',
+      triggerType: 'scheduled_task', triggerPreview: 'check email',
+      startedAt: '2024-01-01T00:00:10.000Z',
+    });
+    insertThoughtBlock({ id: 'b3', sessionId: 'session-2', blockIndex: 0, timestamp: '2024-01-01T00:00:10.000Z', thinking: 'checking email now' });
+    finalizeThoughtSession('session-2', 3000, 1, 50);
+  });
+
+  it('returns sessions newest-first with their blocks', () => {
+    const thoughts = getRecentThoughts('main', 10);
+    expect(thoughts).toHaveLength(2);
+    expect(thoughts[0].sessionId).toBe('session-2');  // newest
+    expect(thoughts[1].sessionId).toBe('session-1');
+    expect(thoughts[1].blocks).toHaveLength(2);
+    expect(thoughts[1].blocks[0].thinking).toBe('thinking about hello');
+  });
+
+  it('respects limit', () => {
+    const thoughts = getRecentThoughts('main', 1);
+    expect(thoughts).toHaveLength(1);
+    expect(thoughts[0].sessionId).toBe('session-2');
+  });
+
+  it('filters by group folder', () => {
+    createThoughtSession({
+      id: 'session-other', chatJid: 'c', groupFolder: 'other-group',
+      triggerType: 'user_message', triggerPreview: 'test',
+      startedAt: '2024-01-01T00:00:20.000Z',
+    });
+    insertThoughtBlock({ id: 'b-other', sessionId: 'session-other', blockIndex: 0, timestamp: '2024-01-01T00:00:20.000Z', thinking: 'other group thought' });
+    finalizeThoughtSession('session-other', 1000, 1, 20);
+
+    const mainThoughts = getRecentThoughts('main', 100);
+    expect(mainThoughts).toHaveLength(2);
+    const otherThoughts = getRecentThoughts('other-group', 100);
+    expect(otherThoughts).toHaveLength(1);
+    expect(otherThoughts[0].blocks[0].thinking).toBe('other group thought');
+  });
+
+  it('returns blocks in block_index order within a session', () => {
+    const thoughts = getRecentThoughts('main', 10);
+    const session1 = thoughts.find(t => t.sessionId === 'session-1')!;
+    expect(session1.blocks[0].thinking).toBe('thinking about hello');
+    expect(session1.blocks[1].thinking).toBe('decided to respond');
   });
 });
