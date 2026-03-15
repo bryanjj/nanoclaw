@@ -10,7 +10,6 @@ import path from 'path';
 import pino from 'pino';
 import {
   CONTAINER_IMAGE,
-  CONTAINER_TIMEOUT,
   CONTAINER_MAX_OUTPUT_SIZE,
   GROUPS_DIR,
   DATA_DIR
@@ -324,18 +323,7 @@ export async function runContainerAgent(
       }
     });
 
-    const timeout = setTimeout(() => {
-      logger.error({ group: group.name }, 'Container timeout, killing');
-      container.kill('SIGKILL');
-      resolve({
-        status: 'error',
-        result: null,
-        error: `Container timed out after ${CONTAINER_TIMEOUT}ms`
-      });
-    }, group.containerConfig?.timeout || CONTAINER_TIMEOUT);
-
     container.on('close', (code) => {
-      clearTimeout(timeout);
       const duration = Date.now() - startTime;
 
       // Finalize thought history
@@ -475,7 +463,6 @@ export async function runContainerAgent(
     });
 
     container.on('error', (err) => {
-      clearTimeout(timeout);
       logger.error({ group: group.name, error: err }, 'Container spawn error');
       resolve({
         status: 'error',

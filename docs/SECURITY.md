@@ -40,12 +40,11 @@ private_key, .secret
 - Container path validation (rejects `..` and absolute paths)
 - `nonMainReadOnly` option forces read-only for non-main groups
 
-### 3. Session Isolation
+### 3. Group Isolation
 
-Each group has isolated Claude sessions at `data/sessions/{group}/.claude/`:
-- Groups cannot see other groups' conversation history
-- Session data includes full message history and file contents read
-- Prevents cross-group information disclosure
+Each group has an isolated `.claude/` directory at `data/sessions/{group}/.claude/`:
+- Groups cannot see other groups' SDK state
+- Context history (messages, thoughts) is injected by the host from SQLite, scoped to the group
 
 ### 4. IPC Authorization
 

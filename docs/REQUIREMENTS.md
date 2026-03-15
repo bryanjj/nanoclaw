@@ -97,9 +97,9 @@ A personal Claude assistant accessible via Telegram, with minimal custom code.
 - **Files**: Groups can create/read files in their folder and reference them
 - Agent runs in the group's folder, automatically inherits both CLAUDE.md files
 
-### Session Management
-- Each group maintains a conversation session (via Claude Agent SDK)
-- Sessions auto-compact when context gets too long, preserving critical information
+### Context History
+- The host injects recent messages and thought history into each prompt from SQLite
+- Messages and thoughts are fetched newest-first until hitting character caps (30K/20K), giving the agent awareness of recent conversations and reasoning
 
 ### Container Isolation
 - All agents run inside Apple Container (lightweight Linux VMs)

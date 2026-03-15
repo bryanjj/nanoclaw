@@ -104,9 +104,6 @@ Skills we'd love to see:
 **Platform Support**
 - `/setup-windows` - Windows via WSL2 + Docker
 
-**Session Management**
-- `/add-clear` - Add a `/clear` command that compacts the conversation (summarizes context while preserving critical information in the same session). Requires figuring out how to trigger compaction programmatically via the Claude Agent SDK.
-
 ## Requirements
 
 - macOS or Linux

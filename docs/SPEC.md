@@ -10,7 +10,7 @@ A personal Claude assistant accessible via Telegram, with persistent memory per 
 2. [Folder Structure](#folder-structure)
 3. [Configuration](#configuration)
 4. [Memory System](#memory-system)
-5. [Session Management](#session-management)
+5. [Context History](#context-history)
 6. [Message Flow](#message-flow)
 7. [Commands](#commands)
 8. [Scheduled Tasks](#scheduled-tasks)
@@ -54,7 +54,7 @@ A personal Claude assistant accessible via Telegram, with persistent memory per 
 │  │  Volume mounts:                                                │   │
 │  │    • groups/{name}/ → /workspace/group                         │   │
 │  │    • groups/global/ → /workspace/global/ (non-main only)        │   │
-│  │    • data/sessions/{group}/.claude/ → /home/node/.claude/      │   │
+│  │    • data/sessions/{group}/.claude/ → /home/node/.claude/ (SDK) │   │
 │  │    • Additional dirs → /workspace/extra/*                      │   │
 │  │                                                                │   │
 │  │  Tools (all groups):                                           │   │
@@ -144,7 +144,6 @@ nanoclaw/
 │   └── messages.db                # SQLite database (messages, scheduled_tasks, task_run_logs)
 │
 ├── data/                          # Application state (gitignored)
-│   ├── sessions.json              # Active session IDs per group
 │   ├── registered_groups.json     # Group JID → folder mapping
 │   ├── router_state.json          # Last processed timestamp + last agent timestamps
 │   ├── env/env                    # Copy of .env for container mounting
@@ -180,7 +179,6 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 // Container configuration
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
-export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '300000', 10);
 export const IPC_POLL_INTERVAL = 1000;
 
 export const TRIGGER_PATTERN = new RegExp(`^@${ASSISTANT_NAME}\\b`, 'i');
@@ -207,7 +205,6 @@ Groups can have additional directories mounted via `containerConfig` in `data/re
           "readonly": false
         }
       ],
-      "timeout": 600000
     }
   }
 }
@@ -288,23 +285,17 @@ NanoClaw uses a hierarchical memory system based on CLAUDE.md files.
 
 ---
 
-## Session Management
+## Context History
 
-Sessions enable conversation continuity - Claude remembers what you talked about.
+Each container run gets a fresh SDK session. The host injects recent context directly into the prompt so the agent has awareness of past conversations and reasoning.
 
-### How Sessions Work
+### How It Works
 
-1. Each group has a session ID stored in `data/sessions.json`
-2. Session ID is passed to Claude Agent SDK's `resume` option
-3. Claude continues the conversation with full context
-
-**data/sessions.json:**
-```json
-{
-  "main": "session-abc123",
-  "Family Chat": "session-def456"
-}
-```
+1. Before each container run, the host queries SQLite for recent messages and thought history
+2. Messages are fetched newest-first until hitting a 30K character cap, then reversed to chronological order
+3. Thinking blocks are fetched newest-first until hitting a 20K character cap, then reversed
+4. Both are prepended to the prompt as `<context_history>` XML before passing to the container
+5. Each container run is self-contained — one `query()` call per prompt
 
 ---
 
@@ -336,22 +327,27 @@ Sessions enable conversation continuity - Claude remembers what you talked about
    └── Build prompt with full conversation context
    │
    ▼
-7. Router invokes Claude Agent SDK:
+7. Router builds context prefix:
+   ├── Queries recent messages from SQLite (all senders, capped at 30K chars)
+   ├── Queries recent thinking blocks from SQLite (capped at 20K chars)
+   └── Prepends as <context_history> XML to prompt
+   │
+   ▼
+8. Router spawns container:
    ├── cwd: groups/{group-name}/
-   ├── prompt: conversation history + current message
-   ├── resume: session_id (for continuity)
+   ├── prompt: context history + conversation + current message
    └── mcpServers: nanoclaw (scheduler)
    │
    ▼
-8. Claude processes message:
+9. Claude processes message:
    ├── Reads CLAUDE.md files for context
    └── Uses tools as needed (search, email, etc.)
    │
    ▼
-9. Agent sends response via Telegram using send_message tool
-   │
-   ▼
-10. Router updates last agent timestamp and saves session ID
+10. Agent sends response via Telegram using send_message tool
+    │
+    ▼
+11. Router updates last agent timestamp
 ```
 
 ### Trigger Word Matching
@@ -485,7 +481,7 @@ NanoClaw runs as a single macOS launchd service.
 When NanoClaw starts, it:
 1. **Ensures Apple Container system is running** - Automatically starts it if needed (survives reboots)
 2. Initializes the SQLite database
-3. Loads state (registered groups, sessions, router state)
+3. Loads state (registered groups, router state)
 4. Connects to Telegram
 5. Starts the message polling loop
 6. Starts the scheduler loop
@@ -583,7 +579,7 @@ Messages could contain malicious instructions attempting to manipulate Claude's 
 
 | Credential | Storage Location | Notes |
 |------------|------------------|-------|
-| Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/ |
+| Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/. Used by the SDK for internal state. |
 | Telegram Bot Token | .env | Set TELEGRAM_BOT_TOKEN |
 
 ### File Permissions
@@ -603,9 +599,7 @@ chmod 700 groups/
 |-------|-------|----------|
 | No response to messages | Service not running | Check `launchctl list | grep nanoclaw` |
 | "Claude Code process exited with code 1" | Apple Container failed to start | Check logs; NanoClaw auto-starts container system but may fail |
-| "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
-| Session not continuing | Session ID not saved | Check `data/sessions.json` |
-| Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
+| "Claude Code process exited with code 1" | SDK mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
 | "Telegram not configured" | Bot token missing | Set TELEGRAM_BOT_TOKEN in .env |
 | "No groups registered" | Haven't added groups | Use `@Andy add group "Name"` in main |
 
